@@ -1,0 +1,30 @@
+{
+  "name": "@antecipa/ledger-bot",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./chain": {
+      "types": "./src/chain.ts",
+      "default": "./src/chain.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "worker": "tsx src/worker.ts",
+    "bootstrap": "tsx src/bootstrap-cli.ts"
+  },
+  "dependencies": {
+    "@antecipa/xrpl": "^0.0.0",
+    "@supabase/supabase-js": "2.109.0",
+    "xrpl": "^5.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "tsx": "^4.23.15"
+  }
+}

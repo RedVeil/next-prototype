@@ -2,26 +2,20 @@
   "name": "next-prototype",
   "version": "0.1.0",
   "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "services/*"
+  ],
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint"
-  },
-  "dependencies": {
-    "lucide-react": "^1.38.0",
-    "next": "16.3.3",
-    "react": "19.2.8",
-    "react-dom": "19.2.8"
-  },
-  "devDependencies": {
-    "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "eslint": "^9",
-    "eslint-config-next": "16.3.3",
-    "tailwindcss": "^4",
-    "typescript": "^5"
+    "dev": "npm run dev -w @antecipa/web",
+    "build": "npm run build -w @antecipa/web",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "worker": "npm run worker -w @antecipa/ledger-bot",
+    "scan": "npm run worker -w @antecipa/invoice-scanner",
+    "match": "npm run worker -w @antecipa/matcher",
+    "bootstrap": "npm run bootstrap -w @antecipa/ledger-bot",
+    "lint": "npm run lint -w @antecipa/web",
+    "start": "npm run start -w @antecipa/web"
   }
 }

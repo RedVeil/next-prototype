@@ -1,0 +1,41 @@
+{
+  "name": "@antecipa/web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "typecheck": "next typegen && tsc --noEmit"
+  },
+  "dependencies": {
+    "@antecipa/domain": "*",
+    "@antecipa/funder": "*",
+    "@antecipa/ledger-bot": "*",
+    "@antecipa/matcher": "*",
+    "@antecipa/payouts": "*",
+    "@antecipa/rails": "*",
+    "@antecipa/risk": "*",
+    "@antecipa/xrpl": "*",
+    "@supabase/ssr": "^0.10.2",
+    "@supabase/supabase-js": "^2.109.0",
+    "@xrpl-commons/xrpl-connect-react": "^1.0.0",
+    "lucide-react": "^1.38.0",
+    "next": "16.3.3",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "xrpl": "^5.3.0",
+    "xrpl-connect": "^1.0.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.3",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}
