@@ -3,18 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "workspaces": [
-    "apps/*",
-    "packages/*",
-    "services/*"
+    "apps/*"
   ],
   "scripts": {
     "dev": "npm run dev -w @antecipa/web",
     "build": "npm run build -w @antecipa/web",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "worker": "npm run worker -w @antecipa/ledger-bot",
-    "scan": "npm run worker -w @antecipa/invoice-scanner",
-    "match": "npm run worker -w @antecipa/matcher",
-    "bootstrap": "npm run bootstrap -w @antecipa/ledger-bot",
     "lint": "npm run lint -w @antecipa/web",
     "start": "npm run start -w @antecipa/web"
   }

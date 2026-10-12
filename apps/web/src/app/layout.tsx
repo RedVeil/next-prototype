@@ -1,6 +1,8 @@
 import type { Metadata } from "next"
 import { Geist, Geist_Mono } from "next/font/google"
-import { Providers } from "@/components/layout/Providers"
+import { TopNav } from "./nav"
+import { loadNavProfile } from "./portal/nav-profile"
+import { Sidebar } from "./sidebar"
 import "./globals.css"
 
 const geistSans = Geist({
@@ -15,19 +17,23 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Antecipa",
-  description: "Invoice financing for Brazilian SMEs",
+  description: "Database connection",
 }
 
-export default function RootLayout({ children }: LayoutProps<"/">) {
+export default async function RootLayout({ children }: LayoutProps<"/">) {
+  const profile = await loadNavProfile()
+
   return (
     <html
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="flex min-h-full flex-col">
-        <Providers>
-          <div className="flex min-h-dvh flex-1 flex-col">{children}</div>
-        </Providers>
+        <TopNav profile={profile} />
+        <div className="flex min-h-0 flex-1 flex-col md:flex-row">
+          <Sidebar />
+          <div className="flex min-w-0 flex-1 flex-col">{children}</div>
+        </div>
       </body>
     </html>
   )

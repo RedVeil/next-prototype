@@ -2,6 +2,8 @@
 
 This is the design record for the invoice platform. It is written so a person can read it without opening the code. When a decision, a stub, or an open question changes, update this file in the same change.
 
+The sections through Open questions describe what is built. The target data model at the end is the agreed replacement. It is not built yet. Where they differ, the target model is the one to implement, and these earlier sections stay until that work lands.
+
 The web app signs in through Supabase Auth and writes companies, investors, and buckets to the database. The ledger bot generates multisig keys and submits provisioning on XRPL mainnet. It watches RLUSD deposits, and the investor signs withdrawals in Xaman. Seeds stay on the ledger bot. A separate scanner stores new eligible invoices. A separate matcher writes open offers. NFT and payout work stays unwired.
 
 ## Decisions
@@ -140,3 +142,77 @@ When two investors offer the same lowest price, the matcher picks one at random.
 ### XRPL constraints
 
 Accounts that hold RLUSD need a trust line to the RLUSD issuer. Each multisig needs its own XRP reserve, in addition to the bot wallets the funder tops up. The invoice NFT is not yet specified as non-transferable, so an investor signer could move it off multisig 1. Quorum 1 means that investor's bot key can move unreserved RLUSD on multisig 1 while the bot is not paused. The single master key decrypts every bot seed stored in the database.
+
+## Target data model
+
+This is the model to build toward. The live schema still has separate company, investor, and buyer tables, two investor multisigs, a risk range, and a bucket criteria mode. The replacement tables are added beside those. Live `invoices`, `buckets`, and `portfolio_snapshots` keep their names, so the replacement copies are `organisation_invoices`, `organisation_buckets`, and `organisation_portfolio_snapshots`.
+
+### Organisations
+
+Seller, obligor, and investor are the same kind of row. An organisation can be an obligor because it appears on an invoice, and later be linked to a login and act as a seller or an investor. Admin is a login with no organisation.
+
+The row has an internal id, a legal name, a company id, a country, and a description. The company id is the external registration number, a CNPJ in Brazil. Uniqueness is country plus company id. Onboarding looks up that company id. If the organisation is missing, it is created and the new identity is linked. If it already exists, the identity is linked to that row and the person edits it. A second organisation is not created. Anyone who later signs up with the same company id can edit the same row. Proof that they control the company comes later.
+
+The description stays on the organisation. It is not copied onto an invoice.
+
+Industries come from one shared list. A person picks up to three for their organisation, or types a new name. A new name is saved into that same list and linked, so the next person can pick it. The list itself has no cap. Matching reads the seller organisation's industries. They are not copied onto the invoice.
+
+Currencies are their own rows: the organisation, the currency code, and a use of `invoices` or `funding`. The same code can appear once per use. A company that sells and invests has BRL with use `invoices` and RLUSD with use `funding`. The invoice still stores the currency of that document. For a Brazilian seller that is BRL. Buckets match the invoice currency. Deposits and repayments on the ledger use the funding currency, RLUSD.
+
+Payment methods are their own rows: the organisation, a method (`pix`, `iban`, `xrpl`, `paypal`, and later ones), and the identifier. A seller's disbursement uses their PIX row. An investor's own XRPL address is an `xrpl` row, and it stays locked once it is a multisig signer. An obligor does not need a payment method. An incoming repayment joins the invoice through a charge reference stored on that invoice. The payer's company id on the payment is the check that it came from the obligor.
+
+The least an organisation needs, when a seller adds one from an invoice, is a legal name and a company id. Country stays Brazil. Industries, description, payment methods, and a login stay empty.
+
+### Identity and membership
+
+An identity has its own id, a login label, and a username. The username is only the label shown in the interface. `auth_user_id` is optional and is the only link to Supabase Auth. A sandbox identity leaves it empty, so no auth user is created and no email is sent. A later real signup can set that id.
+
+Membership links an identity to an organisation. One identity links to one organisation. Several identities can link to the same organisation. `membership_roles` records `seller` or `investor` on that membership. An obligor created from an invoice has an organisation and no identity until someone signs up.
+
+### One multisig and one bot
+
+Each investor organisation has one multisig. The row exists before the XRPL account does. It stores the organisation, a type, the classic address (empty until created), and a status of `not_created`, `live`, or `paused`. The type is `investor`, `governance`, `issuer`, or `repayment`. The three central accounts use this same table with no organisation. Governance has no bot.
+
+Signers on the investor multisig are the bot, the investor's own XRPL address, and governance. Quorum is 1. `paused` means the bot does not sign, which is when the investor can withdraw the RLUSD still on this account.
+
+One bot signs for each multisig the backend signs for. The investor, the issuer, and repayment each get their own. The bot row stores the address, the encrypted seed, and the multisig it signs for. The web app only sees the address. The investor bot's address is also where reserved RLUSD sits.
+
+A reserve is that bot signing an RLUSD payment from the investor multisig to its own address. A payout is that bot sending that RLUSD on through Ripple Payments. Only the investor multisig should be allowed to pay into the bot account. There is no second investor multisig. Reserved funds on the bot account cannot be recovered by governance if that seed is lost. A full copy of every bot seed, together with the master key, can spend every account those bots sign. Quorum stays 1, so governance does not have to approve each payment.
+
+### Portfolio snapshots
+
+Snapshots are written only for an organisation that has an investor multisig. A row stores the organisation, when it was captured, available RLUSD on the multisig, reserved RLUSD on the bot, the expected RLUSD repayment of bought invoices the obligor has not paid, and the portfolio as the sum of those three. Invoice face amounts stay in the invoice currency and do not enter this total. Sellers do not get snapshots.
+
+The sandbox records a balance by inserting one of these rows. Available increases by the amount entered, reserved stays 0, and outstanding stays 0 until a bought invoice exists. Nothing is submitted to XRPL, and the investor multisig row stays `not_created` with an empty address and no bot.
+
+### Invoices
+
+An invoice has its database id and a required document id. In Brazil the document id is the NF-e id, and it is unique.
+
+The seller organisation and the obligor organisation are required. The buyer is the investor organisation that bought the receivable, and it stays empty until the invoice is sold. Face value, currency, origination date, and due date are required. The currency covers the face value, the sold price, and the repayment. Repayment amount is required and starts at 0. Repaid is required and starts false. It becomes true once the repayment amount reaches the face value, including a payment that goes past the face. The repaid date is set on the day it first reaches the face, and stays empty until then. Sold price, sold date, and buyer are set together when it sells, and stay empty until then. The sold price is what the buyer pays, in the invoice currency: the face minus the discount. The obligor owes the face, not the sold price. The RLUSD the bot sends is the payment, not a second amount on the invoice.
+
+Each invoice has at least one line. Product, amount, and unit are required on every line. The product is the string from the NF-e, or from whatever document that country uses. It can be anything: 10 tons, 20 units, 50 hours. It is not chosen from a catalog, and buckets do not filter on it.
+
+The seller can save an invoice whose obligor is not in the system yet. It can be offered only after that obligor organisation exists. The document's tax id is the check. When an organisation already has that company id, the invoice is linked to it. The name on the document does not have to match the stored legal name. When no organisation has that tax id, the offer stays blocked until the seller adds a legal name and a tax id. Those can be prefilled from the XML. Saving creates the organisation and links the invoice.
+
+### Risk scores
+
+A current score is stored on the organisation and on the invoice. It is an integer from 0 to 10000. A higher number is riskier. The app and the matcher only read the stored values.
+
+Each organisation also stores a baseline. A new organisation's baseline and score start at 10000. Setting a score by hand on the risk page writes that number to both the baseline and the current score.
+
+The risk page keeps the weights in `risk_parameters`. The mix starts at 80 for the obligor and 20 for the seller. Repayment history closes a percent of the gap between the baseline and a floor. The seller step starts at 10 percent and the obligor step starts at 0. The floor starts at 0. Those weights can be changed before a run. Open Finance and insurance, when they exist, are further inputs to that same organisation score.
+
+A run saves the weights, then sets each organisation's score to the floor plus the gap from the baseline, multiplied by the remaining fraction after each repaid invoice. One seller repayment at 10 percent takes a baseline of 10000 down to 9000. The next takes it to 8100. The same count always produces the same score, because the run starts from the baseline. The result is clamped to 0–10000.
+
+An invoice score is the obligor score times the obligor weight, plus the seller score times the seller weight, divided by the sum of the weights. The run writes that score on every invoice, including repaid ones. A new sandbox invoice uses the same mix from the current organisation scores. If the two mix weights sum to 0, the run writes nothing.
+
+### Buckets
+
+A bucket is one investor organisation's mandate. An organisation can have several. It stores the organisation, a name, a status of `active` or `paused`, a risk band, a minimum and maximum face value, an optional tenor band in days from the offer to the due date, industries, countries, currencies, an APR, and an exposure limit. Exposure is either a flat USD amount or a percent of that investor's RLUSD portfolio, converted when the limit is checked. Exposure used is the USD already committed. There is no product list and no and/or switch.
+
+Feature toggles are their own list, so a new one is a new row and not a new column. The list starts with Insured and Seller Buy-Back. A second table records which toggles a bucket uses. A bucket with no row for a toggle has that toggle off. These are flags for later features. They are not match categories until the invoice carries the corresponding fact.
+
+Every category the investor sets is required at once. A different combination is a new bucket. Inside a multiselect, any one value is enough. A multiselect with nothing selected is not a filter. Risk and face value are always set, so those always apply. The invoice score must sit inside the band. The face must sit between the minimum and the maximum, in the invoice currency. The days from the offer to the due date must sit inside the tenor band when one is set. The seller must share one selected industry. The invoice country must be one of the selected countries. The invoice currency must be one of the selected currencies.
+
+A new seller and obligor both start at 10000, so their invoice only matches a bucket whose band includes 10000. The price is the face times the APR times the days divided by 365. The matcher keeps one open offer per invoice, from the bucket with the lowest price.
