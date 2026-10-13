@@ -12,7 +12,15 @@ function Problem({ detail }: { detail: string }) {
   )
 }
 
-export async function PortalHome({ role, loginError }: { role: PortalRole; loginError?: boolean }) {
+export async function PortalHome({
+  role,
+  loginError,
+  query = {},
+}: {
+  role: PortalRole
+  loginError?: boolean
+  query?: Record<string, string | string[] | undefined>
+}) {
   let session: Awaited<ReturnType<typeof portalSession>> = null
   let users: Awaited<ReturnType<typeof loadPortalUsers>> = []
   let detail = ""
@@ -30,14 +38,16 @@ export async function PortalHome({ role, loginError }: { role: PortalRole; login
 
   try {
     if (role === "investor") {
+      const tab = query.tab
       return await InvestorOverview({
         organisationId: session.organisationId,
-        organisation: session.organisation,
+        tab: Array.isArray(tab) ? tab[0] : tab,
       })
     }
     return await SellerOverview({
       organisationId: session.organisationId,
       organisation: session.organisation,
+      query,
     })
   } catch (error) {
     return <Problem detail={error instanceof Error ? error.message : "The database did not respond."} />

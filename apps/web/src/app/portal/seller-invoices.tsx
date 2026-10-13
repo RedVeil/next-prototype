@@ -1,139 +1,182 @@
-"use client"
+import Link from "next/link"
+import { formatDateOnly } from "./format"
+import { MoneyGroup } from "./money-value"
+import { AcceptOfferButton } from "./seller-controls"
+import { SELLER_PAGE_SIZE, sellerHref, type SellerQuery } from "./seller-query"
 
-import { useMemo, useState } from "react"
-import { money } from "./metrics"
-
-export type SellerInvoice = {
+export type SellerInvoiceRow = {
   id: string
   documentId: string
   obligor: string
   faceValue: number
   currency: string
   riskScore: number
+  issued: string
   dueDate: string
   soldPrice: number | null
   repaid: boolean
   unsold: boolean
   offer: number | null
-  offerInvestor: string
 }
 
-type SortField = "rating" | "amount" | "due"
-type SortDirection = "desc" | "asc"
+const SORTABLE: { key: SellerQuery["sort"]; label: string }[] = [
+  { key: "number", label: "Invoice" },
+  { key: "customer", label: "Customer" },
+  { key: "issued", label: "Issued" },
+  { key: "due", label: "Due" },
+  { key: "amount", label: "Amount" },
+]
 
-const selectClass =
-  "h-10 rounded-lg border border-border bg-white px-3 text-sm outline-none focus:border-foreground"
+export function SellerInvoices({
+  invoices,
+  total,
+  unfilteredTotal,
+  query,
+  rate,
+}: {
+  invoices: SellerInvoiceRow[]
+  total: number
+  unfilteredTotal: number
+  query: SellerQuery
+  rate: number | null
+}) {
+  const filtersActive = query.q !== "" || query.sale !== "all" || query.offer !== "any" || query.sort !== "due" || query.dir !== "asc"
+  if (unfilteredTotal === 0) {
+    return <p className="mt-6 text-sm leading-relaxed text-neutral-600">Invoices appear here after one is added for this organisation.</p>
+  }
+  if (total === 0 && !filtersActive) {
+    return <p className="mt-6 text-sm leading-relaxed text-neutral-600">Invoices appear here after one is added for this organisation.</p>
+  }
 
-function sortValue(invoice: SellerInvoice, field: SortField) {
-  if (field === "rating") return invoice.riskScore
-  if (field === "amount") return invoice.faceValue
-  return invoice.dueDate
-}
-
-export function SellerInvoices({ invoices }: { invoices: SellerInvoice[] }) {
-  const [showAll, setShowAll] = useState(false)
-  const [sortField, setSortField] = useState<SortField>("rating")
-  const [sortDirection, setSortDirection] = useState<SortDirection>("desc")
-
-  const visible = useMemo(() => {
-    const filtered = showAll ? invoices : invoices.filter((invoice) => invoice.unsold && !invoice.repaid)
-    return [...filtered].sort((a, b) => {
-      const left = sortValue(a, sortField)
-      const right = sortValue(b, sortField)
-      if (left === right) return 0
-      const delta = left < right ? -1 : 1
-      return sortDirection === "desc" ? -delta : delta
-    })
-  }, [invoices, showAll, sortField, sortDirection])
+  const pageCount = Math.max(1, Math.ceil(total / SELLER_PAGE_SIZE))
+  const current = Math.min(Math.max(query.page, 1), pageCount)
+  const from = total === 0 ? 0 : (current - 1) * SELLER_PAGE_SIZE + 1
+  const to = (current - 1) * SELLER_PAGE_SIZE + invoices.length
 
   return (
-    <section className="mt-10">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-        <div>
-          <h2 className="text-lg font-semibold tracking-tight">{showAll ? "All invoices" : "Unsold invoices"}</h2>
-          <p className="mt-1 text-sm text-muted">
-            {showAll ? "Includes sold and repaid invoices." : "Invoices that have not been sold and have not been repaid."}
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-3">
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={showAll}
-              onChange={(event) => setShowAll(event.target.checked)}
-              className="size-4 accent-foreground"
-            />
-            Show all invoices
-          </label>
-          <label className="flex items-center gap-2 text-sm text-muted">
-            <span className="whitespace-nowrap">Sort by</span>
-            <select
-              value={sortField}
-              onChange={(event) => setSortField(event.target.value as SortField)}
-              className={selectClass}
-              aria-label="Sort invoices by"
-            >
-              <option value="rating">Rating</option>
-              <option value="amount">Invoice amount</option>
-              <option value="due">Due date</option>
-            </select>
-          </label>
-          <select
-            value={sortDirection}
-            onChange={(event) => setSortDirection(event.target.value as SortDirection)}
-            className={selectClass}
-            aria-label="Sort direction"
-          >
-            <option value="desc">Largest</option>
-            <option value="asc">Smallest</option>
-          </select>
+    <div className="mt-8">
+      <h2 className="text-lg font-semibold tracking-tight text-neutral-900">Invoices</h2>
+      <p className="mt-2 text-sm text-neutral-500">Invoices that are still due, plus any that are already sold.</p>
+      <form method="get" action="/seller" className="mt-4 flex flex-wrap items-center gap-3">
+        <input
+          name="q"
+          defaultValue={query.q}
+          placeholder="Invoice or customer"
+          aria-label="Search invoices"
+          className="h-10 w-64 max-w-full rounded-md border border-border bg-white px-3 text-sm"
+        />
+        <select name="sale" defaultValue={query.sale} aria-label="Sale status" className="h-10 rounded-md border border-border bg-white px-3 text-sm">
+          <option value="all">All sales</option>
+          <option value="unsold">Unsold</option>
+          <option value="sold">Sold</option>
+        </select>
+        <select name="offer" defaultValue={query.offer} aria-label="Offer status" className="h-10 rounded-md border border-border bg-white px-3 text-sm">
+          <option value="any">Any offer</option>
+          <option value="open">Open offer</option>
+          <option value="accepted">Accepted</option>
+          <option value="none">No offer</option>
+        </select>
+        {query.sort !== "due" ? <input type="hidden" name="sort" value={query.sort} /> : null}
+        {query.dir !== "asc" ? <input type="hidden" name="dir" value={query.dir} /> : null}
+        <button type="submit" className="h-10 rounded-md bg-neutral-900 px-4 text-sm font-medium text-white">
+          Search
+        </button>
+        {filtersActive ? (
+          <Link href="/seller" className="text-sm font-medium text-neutral-900 underline">
+            Clear
+          </Link>
+        ) : null}
+      </form>
+      <div className="mt-8 overflow-x-auto rounded-lg border border-border bg-white">
+        <table className="w-full min-w-[880px] text-left text-sm">
+          <thead className="border-b border-border text-xs tracking-wide text-neutral-500 uppercase">
+            <tr>
+              {SORTABLE.map((column) => {
+                const active = query.sort === column.key
+                const nextDir = active && query.dir === "asc" ? "desc" : "asc"
+                return (
+                  <th
+                    key={column.key}
+                    className="px-4 py-3 font-medium"
+                    aria-sort={active ? (query.dir === "asc" ? "ascending" : "descending") : "none"}
+                  >
+                    <Link
+                      href={sellerHref(query, { sort: column.key, dir: nextDir, page: 1 })}
+                      className={active ? "text-neutral-900" : "hover:text-neutral-800"}
+                    >
+                      {column.label}
+                      {active ? (query.dir === "asc" ? " ↑" : " ↓") : ""}
+                    </Link>
+                  </th>
+                )
+              })}
+              <th className="px-4 py-3 font-medium">Offered</th>
+              <th className="px-4 py-3 font-medium">Risk</th>
+              <th className="px-4 py-3 font-medium"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {invoices.length === 0 ? (
+              <tr>
+                <td colSpan={8} className="px-4 py-8 text-center text-neutral-500">
+                  No invoices match these filters.
+                </td>
+              </tr>
+            ) : (
+              invoices.map((invoice) => {
+                const offered = invoice.unsold ? invoice.offer : invoice.soldPrice
+                return (
+                  <tr key={invoice.id} className="border-b border-border last:border-0">
+                    <td className="px-4 py-3 font-medium text-neutral-900">{invoice.documentId}</td>
+                    <td className="px-4 py-3">{invoice.obligor}</td>
+                    <td className="px-4 py-3">{formatDateOnly(invoice.issued)}</td>
+                    <td className="px-4 py-3">{formatDateOnly(invoice.dueDate)}</td>
+                    <td className="px-4 py-3 tabular-nums">
+                      <MoneyGroup rows={[{ amount: invoice.faceValue, currency: invoice.currency }]} rate={rate} compact />
+                    </td>
+                    <td className="px-4 py-3 tabular-nums">
+                      {offered === null ? (
+                        "—"
+                      ) : (
+                        <MoneyGroup rows={[{ amount: offered, currency: invoice.currency }]} rate={rate} compact />
+                      )}
+                    </td>
+                    <td className="px-4 py-3 tabular-nums">{invoice.riskScore}</td>
+                    <td className="px-4 py-3">
+                      {!invoice.unsold ? (
+                        <span className="text-xs font-medium text-emerald-800">Accepted</span>
+                      ) : invoice.offer !== null && !invoice.repaid ? (
+                        <AcceptOfferButton invoiceId={invoice.id} />
+                      ) : null}
+                    </td>
+                  </tr>
+                )
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+      <div className="mt-4 flex items-center justify-between text-sm text-neutral-600">
+        <p>
+          {from}–{to} of {new Intl.NumberFormat("en-US").format(total)}
+        </p>
+        <div className="flex gap-3">
+          {current > 1 ? (
+            <Link href={sellerHref(query, { page: current - 1 })} className="font-medium text-neutral-900 underline">
+              Previous
+            </Link>
+          ) : (
+            <span className="text-neutral-400">Previous</span>
+          )}
+          {current < pageCount ? (
+            <Link href={sellerHref(query, { page: current + 1 })} className="font-medium text-neutral-900 underline">
+              Next
+            </Link>
+          ) : (
+            <span className="text-neutral-400">Next</span>
+          )}
         </div>
       </div>
-      <div className="mt-5 grid gap-4 lg:grid-cols-3">
-        {visible.length === 0 ? (
-          <p className="text-sm text-muted">No invoices to show.</p>
-        ) : (
-          visible.map((invoice) => {
-            const state = invoice.repaid ? "Repaid" : invoice.unsold ? "Unsold" : "Sold"
-            const priced = invoice.unsold && !invoice.repaid ? invoice.offer : invoice.soldPrice
-            const priceLabel = invoice.unsold && !invoice.repaid ? "Offer" : "Sold price"
-            return (
-              <article key={invoice.id} className="rounded-2xl border border-border bg-surface p-5">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <h3 className="text-base font-semibold">{invoice.obligor || "Obligor"}</h3>
-                    <p className="mt-1 text-sm text-muted">{invoice.documentId}</p>
-                  </div>
-                  <p className="text-sm text-muted">{state}</p>
-                </div>
-                <dl className="mt-5 grid grid-cols-2 gap-4 text-sm">
-                  <div>
-                    <dt className="text-muted">Face value</dt>
-                    <dd className="mt-0.5 font-medium">{money(invoice.faceValue, invoice.currency)}</dd>
-                  </div>
-                  <div>
-                    <dt className="text-muted">Due</dt>
-                    <dd className="mt-0.5 font-medium">{invoice.dueDate}</dd>
-                  </div>
-                  <div>
-                    <dt className="text-muted">Risk score</dt>
-                    <dd className="mt-0.5 font-medium">{invoice.riskScore}</dd>
-                  </div>
-                  {priced !== null ? (
-                    <div>
-                      <dt className="text-muted">{priceLabel}</dt>
-                      <dd className="mt-0.5 font-medium">{money(priced, invoice.currency)}</dd>
-                    </div>
-                  ) : null}
-                </dl>
-                {invoice.unsold && !invoice.repaid && invoice.offer !== null && invoice.offerInvestor ? (
-                  <p className="mt-4 text-sm text-muted">{invoice.offerInvestor}</p>
-                ) : null}
-              </article>
-            )
-          })
-        )}
-      </div>
-    </section>
+    </div>
   )
 }

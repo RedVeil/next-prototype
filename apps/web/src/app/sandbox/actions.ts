@@ -678,9 +678,7 @@ function readBucket(formData: FormData) {
   const exposureLimitPercent = text(formData, "exposure_limit_percent")
     ? requiredNumber(formData, "exposure_limit_percent")
     : null
-  const featureIds = formData
-    .getAll("feature_id")
-    .filter((value): value is string => typeof value === "string" && value.length > 0)
+  const featureChoices = readFeatureChoices(formData)
 
   if (!organisationId || !name) return { error: "Choose an investor and name the bucket." }
   if (status !== "active" && status !== "paused") return { error: "Status must be active or paused." }
@@ -729,7 +727,7 @@ function readBucket(formData: FormData) {
       industries: list(formData, "industries"),
       countries: list(formData, "countries"),
       currencies: list(formData, "currencies"),
-      featureIds,
+      featureChoices,
     },
   }
 }
@@ -771,16 +769,44 @@ async function requireInvestor(supabase: ServiceClient, organisationId: string) 
   return null
 }
 
-async function saveBucketFeatures(supabase: ServiceClient, bucketId: string, featureIds: string[]) {
+function readFeatureChoices(formData: FormData) {
+  const choices: { id: string; mode: "yes" | "no" }[] = []
+  let sawMode = false
+  for (const [key, value] of formData.entries()) {
+    if (!key.startsWith("feature_mode_") || typeof value !== "string") continue
+    sawMode = true
+    if (value !== "yes" && value !== "no") continue
+    choices.push({ id: key.slice("feature_mode_".length), mode: value })
+  }
+  if (sawMode) return choices
+  return formData
+    .getAll("feature_id")
+    .filter((value): value is string => typeof value === "string" && value.length > 0)
+    .map((id) => ({ id, mode: "yes" as const }))
+}
+
+async function saveBucketFeatures(
+  supabase: ServiceClient,
+  bucketId: string,
+  choices: { id: string; mode: "yes" | "no" }[],
+) {
+  const probe = await supabase.from("organisation_bucket_features").select("mode").limit(1)
+  const modeColumn = !probe.error
+  if (!modeColumn && !probe.error?.message.toLowerCase().includes("mode")) return probe.error?.message ?? "Could not read toggles."
+  if (!modeColumn && choices.some((choice) => choice.mode === "no")) {
+    return "Has not could not be saved. Apply the bucket feature mode migration."
+  }
   const { error: deleteError } = await supabase
     .from("organisation_bucket_features")
     .delete()
     .eq("bucket_id", bucketId)
   if (deleteError) return deleteError.message
-  if (featureIds.length === 0) return null
-  const { error } = await supabase.from("organisation_bucket_features").insert(
-    featureIds.map((featureId) => ({ bucket_id: bucketId, feature_id: featureId })),
-  )
+  if (choices.length === 0) return null
+  const rows = modeColumn
+    ? choices.map((choice) => ({ bucket_id: bucketId, feature_id: choice.id, mode: choice.mode }))
+    : choices.filter((choice) => choice.mode === "yes").map((choice) => ({ bucket_id: bucketId, feature_id: choice.id }))
+  if (rows.length === 0) return null
+  const { error } = await supabase.from("organisation_bucket_features").insert(rows)
   return error ? error.message : null
 }
 
@@ -802,7 +828,7 @@ export async function createBucket(
     .single()
   if (error) return { error: error.message }
 
-  const featureError = await saveBucketFeatures(supabase, bucket.id as string, read.input.featureIds)
+  const featureError = await saveBucketFeatures(supabase, bucket.id as string, read.input.featureChoices)
   if (featureError) return { error: featureError }
 
   revalidatePath("/sandbox")
@@ -826,7 +852,7 @@ export async function updateBucket(
   const { error } = await supabase.from("organisation_buckets").update(bucketRow(read.input)).eq("id", id)
   if (error) return { error: error.message }
 
-  const featureError = await saveBucketFeatures(supabase, id, read.input.featureIds)
+  const featureError = await saveBucketFeatures(supabase, id, read.input.featureChoices)
   if (featureError) return { error: featureError }
 
   revalidatePath("/sandbox")

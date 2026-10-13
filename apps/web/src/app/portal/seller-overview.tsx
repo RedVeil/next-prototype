@@ -1,9 +1,10 @@
 import { loadCatalogue } from "@/app/match/load"
 import { runMatch } from "@/app/match/match"
-import { frankfurterRate } from "@/app/match/rate"
+import { frankfurterRate, loadUsdRate } from "@/app/match/rate"
 import { createServiceClient } from "@/lib/supabase/service"
-import { Metric, moneyByCurrency, percent } from "./metrics"
-import { SellerInvoices, type SellerInvoice } from "./seller-invoices"
+import { AddInvoiceButton } from "./seller-controls"
+import { SellerInvoices, type SellerInvoiceRow } from "./seller-invoices"
+import { SELLER_PAGE_SIZE, parseSellerQuery, type SellerQuery } from "./seller-query"
 
 function num(value: unknown) {
   const parsed = Number(value)
@@ -31,40 +32,50 @@ async function pricedOffers(invoiceIds: Set<string>) {
       buckets: catalogue.buckets,
       random: () => 0,
     })
-    const byId = new Map<string, { offer: number | null; investor: string }>()
+    const byId = new Map<string, number | null>()
     for (const outcome of outcomes) {
       if (!invoiceIds.has(outcome.invoiceId)) continue
-      byId.set(outcome.invoiceId, {
-        offer: outcome.offer,
-        investor: outcome.winnerLabel ?? "",
-      })
+      byId.set(outcome.invoiceId, outcome.offer)
     }
     return { detail: null as string | null, byId }
   } catch (error) {
     return {
       detail: error instanceof Error ? error.message : "The offer could not be priced.",
-      byId: new Map<string, { offer: number | null; investor: string }>(),
+      byId: new Map<string, number | null>(),
     }
   }
 }
 
+function sortValue(invoice: SellerInvoiceRow, field: SellerQuery["sort"]) {
+  if (field === "number") return invoice.documentId
+  if (field === "customer") return invoice.obligor
+  if (field === "issued") return invoice.issued
+  if (field === "amount") return invoice.faceValue
+  return invoice.dueDate
+}
+
 export async function SellerOverview({
   organisationId,
-  organisation,
+  query,
 }: {
   organisationId: string
   organisation: string
+  query: Record<string, string | string[] | undefined>
 }) {
+  const parsed = parseSellerQuery(query)
   const supabase = createServiceClient()
-  const [invoicesResult, organisationsResult] = await Promise.all([
+  const [organisation, invoicesResult, organisationsResult, usdRate] = await Promise.all([
+    supabase.from("organisations").select("legal_name, company_id, country").eq("id", organisationId).maybeSingle(),
     supabase
       .from("organisation_invoices")
       .select(
-        "id, document_id, obligor_organisation_id, buyer_organisation_id, face_value, currency, risk_score, due_date, sold_price, sold_date, repaid",
+        "id, document_id, obligor_organisation_id, buyer_organisation_id, face_value, currency, risk_score, origination_date, due_date, sold_price, repaid",
       )
       .eq("seller_organisation_id", organisationId),
-    supabase.from("organisations").select("id, legal_name"),
+    supabase.from("organisations").select("id, legal_name").order("legal_name"),
+    loadUsdRate(),
   ])
+  if (organisation.error) throw new Error(organisation.error.message)
   if (invoicesResult.error) throw new Error(invoicesResult.error.message)
   if (organisationsResult.error) throw new Error(organisationsResult.error.message)
 
@@ -73,16 +84,16 @@ export async function SellerOverview({
   )
   const rows = invoicesResult.data ?? []
   const openIds = new Set(
-    rows
-      .filter((row) => !row.buyer_organisation_id && !row.repaid)
-      .map((row) => row.id as string),
+    rows.filter((row) => !row.buyer_organisation_id && !row.repaid).map((row) => row.id as string),
   )
-  const offers = openIds.size === 0 ? { detail: null, byId: new Map<string, { offer: number | null; investor: string }>() } : await pricedOffers(openIds)
-  const month = new Date().toISOString().slice(0, 7)
-  const invoices: SellerInvoice[] = rows.map((row) => {
+  const offers =
+    openIds.size === 0
+      ? { detail: null, byId: new Map<string, number | null>() }
+      : await pricedOffers(openIds)
+
+  const invoices: SellerInvoiceRow[] = rows.map((row) => {
     const id = row.id as string
     const unsold = !row.buyer_organisation_id
-    const priced = offers.byId.get(id)
     return {
       id,
       documentId: row.document_id as string,
@@ -90,54 +101,64 @@ export async function SellerOverview({
       faceValue: num(row.face_value),
       currency: row.currency as string,
       riskScore: num(row.risk_score),
+      issued: dateOnly(row.origination_date),
       dueDate: dateOnly(row.due_date),
       soldPrice: optionalNum(row.sold_price),
       repaid: Boolean(row.repaid),
       unsold,
-      offer: unsold && !row.repaid ? (priced?.offer ?? null) : null,
-      offerInvestor: priced?.investor ?? "",
+      offer: unsold && !row.repaid ? (offers.byId.get(id) ?? null) : null,
     }
   })
 
-  const open = invoices.filter((invoice) => invoice.unsold && !invoice.repaid)
-  const monthSales = rows.filter((row) => dateOnly(row.sold_date).startsWith(month) && optionalNum(row.sold_price) !== null)
-  const soldCosts = rows.flatMap((row) => {
-    const sold = optionalNum(row.sold_price)
-    const face = num(row.face_value)
-    if (sold === null || face <= 0 || !row.buyer_organisation_id) return []
-    return [(face - sold) / face]
+  const filtered = invoices.filter((invoice) => {
+    if (parsed.q) {
+      const haystack = `${invoice.documentId} ${invoice.obligor}`.toLowerCase()
+      if (!haystack.includes(parsed.q.toLowerCase())) return false
+    }
+    if (parsed.sale === "sold" && invoice.unsold) return false
+    if (parsed.sale === "unsold" && !invoice.unsold) return false
+    const offerState = !invoice.unsold ? "accepted" : invoice.offer !== null ? "open" : "none"
+    if (parsed.offer !== "any" && offerState !== parsed.offer) return false
+    return true
   })
-  const averageCost = soldCosts.length === 0 ? 0 : soldCosts.reduce((sum, cost) => sum + cost, 0) / soldCosts.length
-
-  const metrics = [
-    {
-      label: "Available to finance",
-      value: moneyByCurrency(open.map((invoice) => ({ amount: invoice.faceValue, currency: invoice.currency }))),
-    },
-    { label: "Offers available", value: String(open.filter((invoice) => invoice.offer !== null).length) },
-    {
-      label: "Sold this month",
-      value: moneyByCurrency(
-        monthSales.map((row) => ({ amount: num(row.sold_price), currency: row.currency as string })),
-      ),
-    },
-    { label: "Average financing cost", value: percent(averageCost) },
-  ]
+  filtered.sort((left, right) => {
+    const a = sortValue(left, parsed.sort)
+    const b = sortValue(right, parsed.sort)
+    if (a === b) return 0
+    const delta = a < b ? -1 : 1
+    return parsed.dir === "desc" ? -delta : delta
+  })
+  const pageCount = Math.max(1, Math.ceil(filtered.length / SELLER_PAGE_SIZE))
+  const page = Math.min(parsed.page, pageCount)
+  const visible = filtered.slice((page - 1) * SELLER_PAGE_SIZE, page * SELLER_PAGE_SIZE)
+  const legalName = (organisation.data?.legal_name as string) || "Seller"
+  const companyId = (organisation.data?.company_id as string) || ""
+  const country = (organisation.data?.country as string) || ""
 
   return (
-    <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col px-6 py-10">
-      <div>
-        <p className="text-sm text-muted">{organisation || "Seller"}</p>
-        <h1 className="mt-2 text-2xl font-semibold tracking-tight">Overview</h1>
-        <p className="mt-1 text-sm text-muted">Receivables from invoices issued by this organisation.</p>
-      </div>
-      <div className="mt-8 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        {metrics.map((metric) => (
-          <Metric key={metric.label} label={metric.label} value={metric.value} />
-        ))}
+    <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col px-6 py-8">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight text-neutral-900">{legalName}</h1>
+          <p className="mt-2 text-sm text-neutral-500">
+            Company id {companyId}. Country {country}.
+          </p>
+        </div>
+        <AddInvoiceButton
+          organisations={(organisationsResult.data ?? []).map((row) => ({
+            id: row.id as string,
+            legalName: row.legal_name as string,
+          }))}
+        />
       </div>
       {offers.detail ? <p className="mt-6 text-sm text-red-700">{offers.detail}</p> : null}
-      <SellerInvoices invoices={invoices} />
+      <SellerInvoices
+        invoices={visible}
+        total={filtered.length}
+        unfilteredTotal={invoices.length}
+        query={{ ...parsed, page }}
+        rate={usdRate}
+      />
     </main>
   )
 }

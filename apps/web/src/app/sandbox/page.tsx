@@ -1,6 +1,7 @@
 import { loadCatalogue } from "@/app/match/load"
 import { runMatch } from "@/app/match/match"
 import { frankfurterRate } from "@/app/match/rate"
+import { loadBucketFeatureLinks } from "@/lib/bucket-features"
 import { createServiceClient } from "@/lib/supabase/service"
 import { DemoBrowser, RiskToolbar } from "./browser"
 import { toRlusd } from "./settle"
@@ -139,7 +140,7 @@ async function loadSandbox(): Promise<DemoData> {
         "id, organisation_id, name, status, risk_low, risk_high, face_min, face_max, tenor_min, tenor_max, industries, countries, currencies, apr, exposure_kind, exposure_limit_usd, exposure_limit_percent, created_at",
       )
       .order("created_at", { ascending: false }),
-    supabase.from("organisation_bucket_features").select("bucket_id, feature_id"),
+    loadBucketFeatureLinks(supabase),
     supabase.from("bucket_features").select("id, name").order("name"),
     supabase.from("risk_parameters").select("key, label, weight, sort").order("sort"),
   ])
@@ -157,7 +158,6 @@ async function loadSandbox(): Promise<DemoData> {
     invoices,
     lines,
     buckets,
-    bucketFeatures,
     features,
     parameters,
   ].find((result) => result.error)
@@ -234,9 +234,11 @@ async function loadSandbox(): Promise<DemoData> {
     })
   }
 
-  const featuresByBucket = new Map<string, string[]>()
-  for (const row of bucketFeatures.data ?? []) {
-    push(featuresByBucket, row.bucket_id as string, row.feature_id as string)
+  const featuresByBucket = new Map<string, { id: string; mode: "yes" | "no" }[]>()
+  for (const row of bucketFeatures) {
+    const list = featuresByBucket.get(row.bucketId) ?? []
+    list.push({ id: row.featureId, mode: row.mode })
+    featuresByBucket.set(row.bucketId, list)
   }
 
   const offers = await loadInvoiceOffers(organisationName)
@@ -311,7 +313,7 @@ async function loadSandbox(): Promise<DemoData> {
       exposure_kind: row.exposure_kind as string,
       exposure_limit_usd: optionalNum(row.exposure_limit_usd),
       exposure_limit_percent: optionalNum(row.exposure_limit_percent),
-      feature_ids: featuresByBucket.get(row.id as string) ?? [],
+      feature_modes: featuresByBucket.get(row.id as string) ?? [],
     }
   })
 

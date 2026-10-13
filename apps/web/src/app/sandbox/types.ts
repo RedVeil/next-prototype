@@ -81,7 +81,7 @@ export type BucketRecord = {
   exposure_kind: string
   exposure_limit_usd: number | null
   exposure_limit_percent: number | null
-  feature_ids: string[]
+  feature_modes: { id: string; mode: "yes" | "no" }[]
 }
 
 export type NamedOrganisation = {

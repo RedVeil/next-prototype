@@ -14,7 +14,7 @@ import {
   updateUser,
   type ActionState,
 } from "./actions"
-import { checkDraft, listDraft, textDraft, useFormDraft } from "./drafts"
+import { checkDraft, textDraft, useFormDraft } from "./drafts"
 import type { BucketRecord, InvoiceRecord, NamedOrganisation, OrganisationRecord, UserRecord } from "./types"
 
 const field =
@@ -535,17 +535,23 @@ export function BucketForm({
           className={field}
         />
       </label>
-      {features.map((feature) => (
-        <label key={feature.id} className="flex items-center gap-2 text-sm">
-          <input
-            name="feature_id"
-            type="checkbox"
-            value={feature.id}
-            defaultChecked={listDraft(draft, "feature_id", initial?.feature_ids ?? []).includes(feature.id)}
-          />
-          {feature.name}
-        </label>
-      ))}
+      {features.map((feature) => {
+        const mode = initial?.feature_modes.find((choice) => choice.id === feature.id)?.mode ?? "any"
+        return (
+          <label key={feature.id} className={label}>
+            {feature.name}
+            <select
+              name={`feature_mode_${feature.id}`}
+              className={field}
+              defaultValue={textDraft(draft, `feature_mode_${feature.id}`, mode)}
+            >
+              <option value="any">Any</option>
+              <option value="yes">Has</option>
+              <option value="no">Has not</option>
+            </select>
+          </label>
+        )
+      })}
       <Feedback state={state} />
       <button type="submit" disabled={pending} className={button}>
         {pending ? "Saving" : "Save bucket"}

@@ -8,3 +8,11 @@ export async function frankfurterRate() {
   }
   return rate
 }
+
+export async function loadUsdRate() {
+  try {
+    return await frankfurterRate()
+  } catch {
+    return null
+  }
+}

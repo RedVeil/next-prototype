@@ -1,3 +1,4 @@
+import { loadBucketFeatureLinks } from "@/lib/bucket-features"
 import { createServiceClient } from "@/lib/supabase/service"
 import type { MatchBucket, MatchInvoice } from "./match"
 
@@ -35,16 +36,14 @@ export async function loadCatalogue() {
         .order("created_at", { ascending: true }),
       supabase.from("organisation_buckets").select("*").order("created_at", { ascending: true }),
       supabase.from("bucket_features").select("id, name"),
-      supabase.from("organisation_bucket_features").select("bucket_id, feature_id"),
+      loadBucketFeatureLinks(supabase),
       supabase
         .from("organisation_portfolio_snapshots")
         .select("organisation_id, portfolio_rlusd, captured_at")
         .order("captured_at", { ascending: false }),
     ])
 
-  const failed = [organisations, links, industries, invoices, buckets, features, linksFeatures, snapshots].find(
-    (result) => result.error,
-  )
+  const failed = [organisations, links, industries, invoices, buckets, features, snapshots].find((result) => result.error)
   if (failed?.error) throw new Error(failed.error.message)
 
   const industryName = new Map((industries.data ?? []).map((row) => [row.id as string, row.name as string]))
@@ -66,12 +65,12 @@ export async function loadCatalogue() {
 
   const featureName = new Map((features.data ?? []).map((row) => [row.id as string, row.name as string]))
   const featuresByBucket = new Map<string, string[]>()
-  for (const link of linksFeatures.data ?? []) {
-    const name = featureName.get(link.feature_id as string)
+  for (const link of linksFeatures) {
+    const name = featureName.get(link.featureId)
     if (!name) continue
-    const list = featuresByBucket.get(link.bucket_id as string) ?? []
-    list.push(name)
-    featuresByBucket.set(link.bucket_id as string, list)
+    const list = featuresByBucket.get(link.bucketId) ?? []
+    list.push(link.mode === "no" ? `no ${name}` : name)
+    featuresByBucket.set(link.bucketId, list)
   }
 
   const portfolioByOrg = new Map<string, number>()
