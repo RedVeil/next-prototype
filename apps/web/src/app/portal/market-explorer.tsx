@@ -3,7 +3,8 @@ import type { MarketData } from "./market-data"
 import { CreateMarketBucket, type MarketBucketDraft } from "./market-bucket"
 import { FilterDropdown } from "./market-filters"
 import { RISK_HIGH_DEFAULT, RISK_LOW_DEFAULT, marketFiltersActive, type MarketQuery } from "./market-query"
-import { formatUsd, InvoiceStatsGrid, joinList, weightedRateText } from "./market-present"
+import { AmountByDayChart, CapacityChart, FaceByRiskChart, InvoiceStatsGrid, joinList } from "./market-present"
+import { capacityLadder } from "./market-stats"
 
 const fieldClass = "h-10 rounded-md border border-border bg-white px-3 text-sm"
 
@@ -49,8 +50,10 @@ function bucketDraft(query: MarketQuery, data: MarketData): MarketBucketDraft {
 export function MarketExplorer({ query, data }: { query: MarketQuery; data: MarketData }) {
   const active = marketFiltersActive(query)
   const draft = bucketDraft(query, data)
-  const weightedRates = data.buckets.flatMap((bucket) =>
-    bucket.remainingUsd !== null && bucket.remainingUsd > 0 ? [{ apr: bucket.apr, amount: bucket.remainingUsd }] : [],
+  const capacityLevels = capacityLadder(
+    data.buckets.flatMap((bucket) =>
+      bucket.remainingUsd !== null && bucket.remainingUsd > 0 ? [{ apr: bucket.apr, amount: bucket.remainingUsd }] : [],
+    ),
   )
 
   return (
@@ -169,37 +172,55 @@ export function MarketExplorer({ query, data }: { query: MarketQuery; data: Mark
         <h2 className="text-lg font-semibold tracking-tight text-neutral-900">Invoices</h2>
         <p className="mt-1 text-sm text-neutral-500">
           Invoices match every group. Region and industry use the seller. Currency and risk use the invoice. A selected
-          company matches as seller or obligor.
+          company matches as seller or obligor. Tenor is the days from today until the due date.
         </p>
         <InvoiceStatsGrid stats={data.invoices} />
+        {data.dueDays.length > 0 ? <AmountByDayChart points={data.dueDays} label="Face by due date" /> : null}
+        {data.riskBars.length > 0 ? <FaceByRiskChart points={data.riskBars} /> : null}
+        {data.skippedDue > 0 ? (
+          <p className="mt-3 text-sm text-neutral-600">Invoices with no USD face are left out of the due-date and risk charts.</p>
+        ) : null}
+        <div className="mt-8">
+          <h3 className="text-base font-semibold tracking-tight text-neutral-900">Sold</h3>
+          <p className="mt-1 text-sm text-neutral-500">
+            Face value sold, in USD, for invoices that match these filters. Each bar in the first chart is one day. The
+            second chart groups that face by the APR of the bucket that bought it, lowest APR on the left. Bar height is
+            the cumulative total through that APR, and the dark portion is the amount sold at that APR.
+          </p>
+          {data.soldDays.length === 0 ? (
+            <p className="mt-4 text-sm text-neutral-600">No sold invoices match these filters.</p>
+          ) : (
+            <>
+              <AmountByDayChart points={data.soldDays} label="Sold face" />
+              <CapacityChart levels={data.soldLevels} label="Sold by APR" />
+            </>
+          )}
+          {data.soldDays.length > 0 && data.soldLevels.length === 0 ? (
+            <p className="mt-3 text-sm text-neutral-600">These sales have no APR to place on the book.</p>
+          ) : null}
+          {data.skippedSales > 0 ? (
+            <p className="mt-3 text-sm text-neutral-600">Sold invoices with no USD face are left out.</p>
+          ) : null}
+        </div>
       </section>
 
       <section className="mt-10">
         <h2 className="text-lg font-semibold tracking-tight text-neutral-900">Buckets</h2>
         <p className="mt-1 text-sm text-neutral-500">
-          Average and median APR are weighted by remaining capacity. A toggle set to Has or Has not must pass, and Any is ignored.
+          Sell side of the book. APR runs from lowest on the left to highest on the right. Bar height is cumulative
+          remaining capacity through that APR, and the dark portion is capacity at that APR. The red line is the USD face
+          of invoices that match these filters. Buckets at the same APR share one bar. A toggle set to Has or Has not must
+          pass, and Any is ignored.
         </p>
-        <div className="mt-4 grid gap-4 sm:grid-cols-3">
-          <article className="rounded-lg border border-border bg-white p-5">
-            <p className="text-xs font-medium tracking-wide text-neutral-500 uppercase">Average APR</p>
-            <p className="mt-2 text-2xl font-semibold tracking-tight tabular-nums">{weightedRateText(weightedRates, "average")}</p>
-          </article>
-          <article className="rounded-lg border border-border bg-white p-5">
-            <p className="text-xs font-medium tracking-wide text-neutral-500 uppercase">Median APR</p>
-            <p className="mt-2 text-2xl font-semibold tracking-tight tabular-nums">{weightedRateText(weightedRates, "median")}</p>
-          </article>
-          <article className="rounded-lg border border-border bg-white p-5">
-            <p className="text-xs font-medium tracking-wide text-neutral-500 uppercase">Remaining capacity</p>
-            <p className="mt-2 text-2xl font-semibold tracking-tight tabular-nums">{formatUsd(data.capacityUsd)}</p>
-          </article>
-        </div>
+        <CapacityChart levels={capacityLevels} label="Remaining capacity" mark={data.invoices.usd?.sum ?? null} />
         {data.unpricedBuckets > 0 ? (
-          <p className="mt-3 text-sm text-neutral-600">
-            Buckets with no computable limit are left out of the average, median, and capacity total.
-          </p>
+          <p className="mt-3 text-sm text-neutral-600">Buckets with no computable limit are left out of the chart.</p>
         ) : null}
         {data.buckets.length === 0 ? (
           <p className="mt-4 text-sm text-neutral-600">No active buckets overlap these filters.</p>
+        ) : null}
+        {data.buckets.length > 0 && capacityLevels.length === 0 ? (
+          <p className="mt-4 text-sm text-neutral-600">No remaining capacity in these buckets.</p>
         ) : null}
       </section>
 

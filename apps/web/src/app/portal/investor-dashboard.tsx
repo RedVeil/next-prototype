@@ -1,9 +1,13 @@
 "use client"
 
-import { useActionState, useState, type ReactNode } from "react"
+import { useState, type FormEvent, type ReactNode } from "react"
 import { useRouter } from "next/navigation"
-import { BucketForm, Dialog, Feedback, useSaved } from "./bucket-form"
-import { deletePortalBucket, moveFunds, setPortalBucketStatus } from "./dashboard-actions"
+import { useSigner, useWallet, useWalletModal } from "@xrpl-commons/xrpl-connect-react"
+import { isWalletError, WalletErrorCode } from "xrpl-connect"
+import { isValidClassicAddress } from "xrpl"
+import { RLUSD_CURRENCY, RLUSD_ISSUER } from "@/ledger/rlusd"
+import { BucketForm, Dialog } from "./bucket-form"
+import { deletePortalBucket, prepareFunds, recordDeposit, setPortalBucketStatus, submitWithdrawal } from "./dashboard-actions"
 import { formatApr, formatJoined, formatSignedAmount, formatWhen } from "./format"
 import { MoneyGroup } from "./money-value"
 import type { DashboardBucket, DashboardHistoryItem, InvestorDashboardData } from "./investor-data"
@@ -38,7 +42,15 @@ function statusTone(status: string): "positive" | "warning" | "danger" | "neutra
   return "neutral"
 }
 
-export function InvestorDashboard({ data, tab }: { data: InvestorDashboardData; tab: TabId }) {
+export function InvestorDashboard({
+  data,
+  walletAddress,
+  tab,
+}: {
+  data: InvestorDashboardData
+  walletAddress: string
+  tab: TabId
+}) {
   const router = useRouter()
   const [movement, setMovement] = useState<"deposit" | "withdrawal" | null>(null)
   const [range, setRange] = useState<ChartRange>("ALL")
@@ -198,12 +210,12 @@ export function InvestorDashboard({ data, tab }: { data: InvestorDashboardData; 
           title={movement === "deposit" ? "Deposit" : "Withdraw"}
           description={
             movement === "deposit"
-              ? "Add RLUSD to available funds."
-              : "Move RLUSD out of available funds."
+              ? "Sends RLUSD from your wallet to the multisig. Cash and portfolio value update after the payment is validated."
+              : "Sends RLUSD from the multisig back to your wallet. It cannot exceed the RLUSD left after open sales."
           }
           onClose={() => setMovement(null)}
         >
-          <FundsForm kind={movement} onSaved={saved} />
+          <FundsForm kind={movement} walletAddress={walletAddress} onSaved={saved} />
         </Dialog>
       ) : null}
       {deleteId ? (
@@ -454,19 +466,142 @@ function ConfirmDialog({
   )
 }
 
-function FundsForm({ kind, onSaved }: { kind: "deposit" | "withdrawal"; onSaved: () => void }) {
-  const [state, action, pending] = useActionState(moveFunds, null)
-  useSaved(state, onSaved)
+function walletMessage(error: unknown) {
+  if (isWalletError(error) && error.code === WalletErrorCode.SIGN_REJECTED) {
+    return "The wallet rejected the transaction."
+  }
+  return error instanceof Error ? error.message : "The payment could not be sent."
+}
+
+function FundsForm({
+  kind,
+  walletAddress,
+  onSaved,
+}: {
+  kind: "deposit" | "withdrawal"
+  walletAddress: string
+  onSaved: () => void
+}) {
+  const { account, disconnect } = useWallet()
+  const { open, ready } = useWalletModal()
+  const { sign, signAndSubmit } = useSigner()
+  const [amount, setAmount] = useState("")
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [retry, setRetry] = useState<{ hash: string } | { blob: string } | null>(null)
+  const stored = isValidClassicAddress(walletAddress)
+  const connected = account?.address === walletAddress
+
+  async function finishRecord(result: { error?: string; message?: string; recorded?: boolean } | null, next: { hash: string } | { blob: string }) {
+    if (result?.error) {
+      setRetry(next)
+      setError(result.error)
+      return
+    }
+    onSaved()
+  }
+
+  async function onSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!stored) {
+      setError("Set an XRPL address on this user before sending RLUSD.")
+      return
+    }
+    setPending(true)
+    setError(null)
+    try {
+      if (retry && "hash" in retry) {
+        await finishRecord(await recordDeposit(retry.hash), retry)
+        return
+      }
+      if (retry && "blob" in retry) {
+        await finishRecord(await submitWithdrawal(retry.blob), retry)
+        return
+      }
+      if (!connected) {
+        await open()
+        return
+      }
+      const value = Number(amount)
+      if (!Number.isFinite(value) || value <= 0) {
+        setError("Amount must be greater than zero.")
+        return
+      }
+      const prepared = await prepareFunds(kind, value)
+      if ("error" in prepared) {
+        setError(prepared.error)
+        return
+      }
+      if (prepared.kind === "deposit") {
+        if (account?.address !== prepared.account) {
+          setError("Connect the wallet saved on this user.")
+          return
+        }
+        const signed = await signAndSubmit({
+          TransactionType: "Payment",
+          Account: prepared.account,
+          Destination: prepared.destination,
+          Amount: { currency: RLUSD_CURRENCY, issuer: RLUSD_ISSUER, value: prepared.value },
+        })
+        await finishRecord(await recordDeposit(signed.hash), { hash: signed.hash })
+        return
+      }
+      const signed = await sign(prepared.transaction)
+      if (!signed.tx_blob) throw new Error("The wallet did not return a signed transaction.")
+      await finishRecord(await submitWithdrawal(signed.tx_blob), { blob: signed.tx_blob })
+    } catch (caught) {
+      setError(walletMessage(caught))
+    } finally {
+      setPending(false)
+    }
+  }
+
   return (
-    <form action={action} className="grid gap-3">
-      <input type="hidden" name="kind" value={kind} />
+    <form onSubmit={(event) => void onSubmit(event)} className="grid gap-3">
+      {stored ? (
+        <p className="text-sm text-neutral-600">
+          Wallet <span className="font-mono text-xs break-all text-neutral-900">{walletAddress}</span>
+        </p>
+      ) : (
+        <p className="text-sm text-neutral-600">Set an XRPL address on this user before sending RLUSD.</p>
+      )}
+      {account && !connected ? (
+        <p className="text-sm text-neutral-600">
+          Connected to <span className="font-mono text-xs break-all">{account.address}</span>.{" "}
+          <button type="button" onClick={() => void disconnect()} className="underline">
+            Disconnect
+          </button>
+        </p>
+      ) : null}
       <label className="block text-sm text-neutral-600">
         Amount
-        <input name="amount" type="number" min="0.01" step="0.01" required className={inputClass} />
+        <input
+          name="amount"
+          type="number"
+          min="0.01"
+          step="0.01"
+          required
+          value={amount}
+          disabled={retry !== null}
+          onChange={(event) => setAmount(event.target.value)}
+          className={inputClass}
+        />
       </label>
-      <Feedback state={state} />
-      <button type="submit" disabled={pending} className="h-10 rounded-md bg-neutral-900 text-sm font-medium text-white disabled:opacity-60">
-        {pending ? "Saving" : kind === "deposit" ? "Deposit" : "Withdraw"}
+      {error ? <p className="text-sm text-red-700">{error}</p> : null}
+      <button
+        type="submit"
+        disabled={pending || !ready || !stored}
+        className="h-10 rounded-md bg-neutral-900 text-sm font-medium text-white disabled:opacity-60"
+      >
+        {pending
+          ? "Sending"
+          : retry
+            ? "Update portfolio"
+            : !connected
+              ? "Connect wallet"
+              : kind === "deposit"
+                ? "Deposit"
+                : "Withdraw"}
       </button>
     </form>
   )

@@ -33,6 +33,7 @@ export type MatchInvoice = {
   seller: string
   obligor: string
   buyerOrganisationId: string | null
+  blockedBuyerIds?: string[]
   repaid: boolean
   dueDate: string
   createdAt: string
@@ -116,6 +117,21 @@ function priceDetail(face: number, currency: string, apr: number, days: number, 
 
 function samePrice(left: number, right: number) {
   return Math.abs(left - right) < 1e-6
+}
+
+export function earlierSaleCooldownMinutes() {
+  const raw = process.env.FAILED_SALE_COOLDOWN_MINUTES?.trim()
+  if (!raw) return 5
+  const minutes = Number(raw)
+  if (!Number.isFinite(minutes) || minutes < 0) {
+    throw new Error("FAILED_SALE_COOLDOWN_MINUTES must be zero or greater.")
+  }
+  return minutes
+}
+
+function cooldownPhrase(minutes: number) {
+  const amount = minutes.toLocaleString("en-US", { maximumFractionDigits: 2 })
+  return `${amount} ${minutes === 1 ? "minute" : "minutes"}`
 }
 
 function listed(values: string[]) {
@@ -292,6 +308,7 @@ export function runMatch(input: {
   random?: () => number
 }): InvoiceOutcome[] {
   const random = input.random ?? Math.random
+  const cooldownMinutes = earlierSaleCooldownMinutes()
   const used = new Map(input.buckets.map((bucket) => [bucket.id, bucket.exposureUsedUsd]))
   const ordered = [...input.invoices].sort((left, right) => {
     if (left.createdAt !== right.createdAt) return left.createdAt < right.createdAt ? -1 : 1
@@ -330,8 +347,16 @@ export function runMatch(input: {
       }
     }
 
+    const blockedBuyers = new Set(invoice.blockedBuyerIds ?? [])
     const attempts = input.buckets.map((bucket) => {
       const checks = checksFor(bucket, invoice, days ?? 0, used.get(bucket.id) ?? 0, input.rate)
+      if (blockedBuyers.has(bucket.organisationId)) {
+        checks.push({
+          name: "Earlier sale",
+          pass: false,
+          detail: `This investor's earlier sale of this invoice failed or expired in the last ${cooldownPhrase(cooldownMinutes)}.`,
+        })
+      }
       const eligible = checks.every((check) => check.pass)
       const tenor = days ?? 0
       const price = eligible ? priceAmount(invoice.faceValue, bucket.apr, tenor) : null

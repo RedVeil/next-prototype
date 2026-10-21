@@ -1,4 +1,5 @@
 import { loadUsdRate } from "@/app/match/rate"
+import { readDisplayedFunds } from "@/portfolio/capture"
 import type { FeatureChoice } from "./market-query"
 import { roundMoney, toRlusd } from "@/app/sandbox/settle"
 import { featureChoicesByBucket, loadBucketFeatureLinks } from "@/lib/bucket-features"
@@ -103,6 +104,12 @@ function moneyRows(rows: Map<string, number>): MoneyRow[] {
 
 export async function loadInvestorDashboard(organisationId: string): Promise<InvestorDashboardData> {
   const supabase = createServiceClient()
+  let wallet: { available: number; reserved: number } | null = null
+  try {
+    wallet = await readDisplayedFunds(supabase, organisationId)
+  } catch {
+    wallet = null
+  }
   const [organisation, snapshots, bucketsResult, featuresResult, linksResult, invoicesResult, movementsResult, usdRate] =
     await Promise.all([
       supabase.from("organisations").select("legal_name, created_at").eq("id", organisationId).maybeSingle(),
@@ -128,7 +135,7 @@ export async function loadInvestorDashboard(organisationId: string): Promise<Inv
         .eq("buyer_organisation_id", organisationId),
       supabase
         .from("organisation_cash_movements")
-        .select("id, kind, amount, created_at")
+        .select("id, kind, amount, created_at, invoice_id")
         .eq("organisation_id", organisationId)
         .order("created_at", { ascending: false }),
       loadUsdRate(),
@@ -191,6 +198,13 @@ export async function loadInvestorDashboard(organisationId: string): Promise<Inv
   let profitConvertible = usdRate !== null
   let counted = false
   let biggest: { amount: number; currency: string; score: number } | null = null
+  const movementRows = movementsMissing ? [] : (movementsResult.data ?? [])
+  const repaymentInvoices = new Set(
+    movementRows
+      .filter((row) => row.kind === "repayment" && typeof row.invoice_id === "string")
+      .map((row) => row.invoice_id as string),
+  )
+  const obligorByInvoice = new Map<string, string>()
 
   for (const row of invoiceRows) {
     const sold = optionalNum(row.sold_price)
@@ -198,6 +212,7 @@ export async function loadInvestorDashboard(organisationId: string): Promise<Inv
     const obligor = obligorName.get(row.obligor_organisation_id as string) || "Invoice"
     const bucket = bucketName.get(String(row.buyer_bucket_id ?? "")) ?? "Bucket"
     const currency = row.currency as string
+    obligorByInvoice.set(row.id as string, obligor)
     if (sold !== null) addMoney(volumeByCurrency, currency, sold)
     if (!row.repaid) {
       positions.push({
@@ -230,28 +245,36 @@ export async function loadInvestorDashboard(organisationId: string): Promise<Inv
       else profitUsd += gainUsd
       const score = gainUsd ?? gain
       if (gain > 0 && (biggest === null || score > biggest.score)) biggest = { amount: gain, currency, score }
-      history.push({
-        id: `repayment:${row.id as string}`,
-        type: "repayment",
-        amount: repayment,
-        unit: currency,
-        at: row.repaid_date ? dateOnly(row.repaid_date) : dateOnly(row.due_date) || null,
-        status: "repaid",
-        detail: obligor,
-      })
+      if (!repaymentInvoices.has(row.id as string)) {
+        history.push({
+          id: `repayment:${row.id as string}`,
+          type: "repayment",
+          amount: repayment,
+          unit: currency,
+          at: row.repaid_date ? dateOnly(row.repaid_date) : dateOnly(row.due_date) || null,
+          status: "repaid",
+          detail: obligor,
+        })
+      }
     }
   }
 
-  for (const row of movementsMissing ? [] : (movementsResult.data ?? [])) {
-    const kind = row.kind === "withdrawal" ? "withdrawal" : "deposit"
+  for (const row of movementRows) {
+    const kind = row.kind === "withdrawal" ? "withdrawal" : row.kind === "repayment" ? "repayment" : "deposit"
+    const invoiceId = typeof row.invoice_id === "string" ? row.invoice_id : ""
     history.push({
       id: `${kind}:${row.id as string}`,
       type: kind,
       amount: num(row.amount),
       unit: "RLUSD",
       at: String(row.created_at),
-      status: "recorded",
-      detail: kind === "deposit" ? "Deposit" : "Withdrawal",
+      status: kind === "repayment" ? "repaid" : "recorded",
+      detail:
+        kind === "repayment"
+          ? obligorByInvoice.get(invoiceId) || "Repayment"
+          : kind === "deposit"
+            ? "Deposit"
+            : "Withdrawal",
     })
   }
 
@@ -264,8 +287,8 @@ export async function loadInvestorDashboard(organisationId: string): Promise<Inv
   return {
     movementsReady: !movementsMissing,
     legalName: (organisation.data?.legal_name as string) || "",
-    available: latest?.cash ?? 0,
-    reserved,
+    available: wallet?.available ?? latest?.cash ?? 0,
+    reserved: wallet?.reserved ?? reserved,
     portfolio: latest ? latest.portfolio : null,
     series,
     buckets,

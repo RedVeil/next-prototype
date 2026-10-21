@@ -23,6 +23,9 @@ export type MarketInvoice = {
   originationDate: string
   dueDate: string
   repaid: boolean
+  soldPrice: number | null
+  soldDate: string | null
+  buyerBucketId: string | null
 }
 
 export type MarketBucket = {
@@ -85,6 +88,130 @@ export function weightedAverage(rows: { apr: number; amount: number }[]) {
   const total = usable.reduce((sum, row) => sum + row.amount, 0)
   if (total <= 0) return null
   return usable.reduce((sum, row) => sum + row.apr * row.amount, 0) / total
+}
+
+export type CapacityLevel = {
+  apr: number
+  amount: number
+  cumulative: number
+}
+
+export function capacityLadder(rows: { apr: number; amount: number }[]): CapacityLevel[] {
+  const usable = rows
+    .filter((row) => Number.isFinite(row.apr) && Number.isFinite(row.amount) && row.amount > 0)
+    .sort((left, right) => left.apr - right.apr)
+  const levels: CapacityLevel[] = []
+  for (const row of usable) {
+    const previous = levels[levels.length - 1]
+    if (previous && previous.apr === row.apr) {
+      previous.amount += row.amount
+      previous.cumulative += row.amount
+      continue
+    }
+    levels.push({
+      apr: row.apr,
+      amount: row.amount,
+      cumulative: (previous?.cumulative ?? 0) + row.amount,
+    })
+  }
+  return levels
+}
+
+export type SoldDay = {
+  date: string
+  amount: number
+}
+
+export function saleApr(face: number, soldPrice: number, soldDate: string, dueDate: string, bucketApr: number | null) {
+  if (bucketApr !== null && Number.isFinite(bucketApr)) return bucketApr
+  const days = tenorDays(soldDate, dueDate)
+  if (days === null || days <= 0 || face <= 0) return null
+  const apr = ((face - soldPrice) * 365) / (face * days)
+  return Number.isFinite(apr) ? apr : null
+}
+
+function faceUsd(face: number, currency: string, rate: number | null) {
+  const code = currency.trim().toUpperCase()
+  if (code === "USD" || code === "RLUSD") return roundMoney(face)
+  if (rate === null) return null
+  return toRlusd(face, currency, rate)
+}
+
+export function soldBooks(invoices: MarketInvoice[], bucketApr: Map<string, number>, rate: number | null) {
+  const days = new Map<string, number>()
+  const levels: { apr: number; amount: number }[] = []
+  let skipped = 0
+  for (const invoice of invoices) {
+    if (invoice.soldPrice === null || !invoice.soldDate) continue
+    const amount = faceUsd(invoice.faceValue, invoice.currency, rate)
+    if (amount === null || amount <= 0) {
+      skipped += 1
+      continue
+    }
+    days.set(invoice.soldDate, (days.get(invoice.soldDate) ?? 0) + amount)
+    const apr = saleApr(
+      invoice.faceValue,
+      invoice.soldPrice,
+      invoice.soldDate,
+      invoice.dueDate,
+      invoice.buyerBucketId ? (bucketApr.get(invoice.buyerBucketId) ?? null) : null,
+    )
+    if (apr !== null) levels.push({ apr, amount })
+  }
+  return {
+    days: [...days.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([date, amount]) => ({ date, amount })),
+    levels: capacityLadder(levels),
+    skipped,
+  }
+}
+
+export function dueByDay(invoices: MarketInvoice[], rate: number | null) {
+  const days = new Map<string, number>()
+  let skipped = 0
+  for (const invoice of invoices) {
+    if (!invoice.dueDate) {
+      skipped += 1
+      continue
+    }
+    const amount = faceUsd(invoice.faceValue, invoice.currency, rate)
+    if (amount === null || amount <= 0) {
+      skipped += 1
+      continue
+    }
+    days.set(invoice.dueDate, (days.get(invoice.dueDate) ?? 0) + amount)
+  }
+  return {
+    days: [...days.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([date, amount]) => ({ date, amount })),
+    skipped,
+  }
+}
+
+export type RiskBar = {
+  score: number
+  amount: number
+}
+
+export function faceByRisk(invoices: MarketInvoice[], rate: number | null) {
+  const groups = new Map<number, number>()
+  let skipped = 0
+  for (const invoice of invoices) {
+    const amount = faceUsd(invoice.faceValue, invoice.currency, rate)
+    if (amount === null || amount <= 0 || !Number.isFinite(invoice.riskScore)) {
+      skipped += 1
+      continue
+    }
+    groups.set(invoice.riskScore, (groups.get(invoice.riskScore) ?? 0) + amount)
+  }
+  return {
+    bars: [...groups.entries()]
+      .sort(([left], [right]) => left - right)
+      .map(([score, amount]) => ({ score, amount })),
+    skipped,
+  }
 }
 
 export function weightedMedian(rows: { apr: number; amount: number }[]) {
@@ -184,7 +311,7 @@ export function remainingCapacity(bucket: MarketBucket, portfolioRlusd: number |
   return null
 }
 
-export function invoiceStats(invoices: MarketInvoice[], rate: number | null): InvoiceStats {
+export function invoiceStats(invoices: MarketInvoice[], rate: number | null, today: string): InvoiceStats {
   const byCurrency = new Map<string, number[]>()
   const tenors: number[] = []
   const risks: number[] = []
@@ -195,7 +322,7 @@ export function invoiceStats(invoices: MarketInvoice[], rate: number | null): In
     const faces = byCurrency.get(currency) ?? []
     faces.push(invoice.faceValue)
     byCurrency.set(currency, faces)
-    const tenor = tenorDays(invoice.originationDate, invoice.dueDate)
+    const tenor = tenorDays(today, invoice.dueDate)
     if (tenor !== null) tenors.push(tenor)
     risks.push(invoice.riskScore)
     const usd = rate === null ? null : toRlusd(invoice.faceValue, currency, rate)

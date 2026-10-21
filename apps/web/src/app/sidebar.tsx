@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation"
 const pages = [
   { href: "/sandbox", label: "Demo data" },
   { href: "/match", label: "Matching" },
+  { href: "/sales", label: "Sales" },
 ]
 
 export function Sidebar() {

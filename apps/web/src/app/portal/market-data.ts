@@ -16,13 +16,19 @@ import {
   invoiceStats,
   organisationMatches,
   productTotals,
+  dueByDay,
+  faceByRisk,
   remainingCapacity,
+  soldBooks,
   tenorDays,
+  type CapacityLevel,
   type InvoiceStats,
   type MarketBucket,
   type MarketInvoice,
   type MarketOrganisation,
   type ProductTotal,
+  type RiskBar,
+  type SoldDay,
 } from "./market-stats"
 
 export type MarketBucketRow = {
@@ -50,6 +56,12 @@ export type MarketData = {
   featureChoices: FeatureChoice[]
   companies: MarketOrganisation[]
   invoices: InvoiceStats
+  dueDays: SoldDay[]
+  riskBars: RiskBar[]
+  skippedDue: number
+  soldDays: SoldDay[]
+  soldLevels: CapacityLevel[]
+  skippedSales: number
   buckets: MarketBucketRow[]
   capacityUsd: number | null
   unpricedBuckets: number
@@ -130,7 +142,7 @@ async function loadRows(): Promise<Loaded> {
     supabase
       .from("organisation_invoices")
       .select(
-        "id, document_id, seller_organisation_id, obligor_organisation_id, face_value, currency, risk_score, origination_date, due_date, repaid",
+        "id, document_id, seller_organisation_id, obligor_organisation_id, face_value, currency, risk_score, origination_date, due_date, repaid, sold_price, sold_date, buyer_bucket_id",
       ),
     supabase
       .from("organisation_buckets")
@@ -189,6 +201,9 @@ async function loadRows(): Promise<Loaded> {
     originationDate: dateOnly(row.origination_date),
     dueDate: dateOnly(row.due_date),
     repaid: Boolean(row.repaid),
+    soldPrice: optionalNum(row.sold_price),
+    soldDate: dateOnly(row.sold_date) || null,
+    buyerBucketId: (row.buyer_bucket_id as string | null) ?? null,
   }))
 
   const featureChoices = featureChoicesByBucket(featureLinks)
@@ -307,7 +322,15 @@ export async function loadMarket(query: MarketQuery): Promise<MarketData> {
   )
   const filter = marketFilter(query, regions, currencies, industries, companyIds, featureChoices)
   const byId = new Map(loaded.organisations.map((org) => [org.id, org]))
+  const today = new Date().toISOString().slice(0, 10)
   const matchedInvoices = loaded.invoices.filter((invoice) => invoiceMatches(invoice, byId.get(invoice.sellerId), filter))
+  const due = dueByDay(matchedInvoices, usdRate)
+  const risk = faceByRisk(matchedInvoices, usdRate)
+  const sales = soldBooks(
+    matchedInvoices,
+    new Map(loaded.buckets.map((bucket) => [bucket.id, bucket.apr])),
+    usdRate,
+  )
   const bucketRows = loaded.buckets
     .filter((bucket) => bucketOverlaps(bucket, filter))
     .map((bucket) => ({
@@ -332,7 +355,13 @@ export async function loadMarket(query: MarketQuery): Promise<MarketData> {
     features: loaded.features,
     featureChoices,
     companies,
-    invoices: invoiceStats(matchedInvoices, usdRate),
+    invoices: invoiceStats(matchedInvoices, usdRate, today),
+    dueDays: due.days,
+    riskBars: risk.bars,
+    skippedDue: due.skipped,
+    soldDays: sales.days,
+    soldLevels: sales.levels,
+    skippedSales: sales.skipped,
     buckets: bucketRows,
     capacityUsd: priced.length === 0 ? null : priced.reduce((sum, bucket) => sum + (bucket.remainingUsd ?? 0), 0),
     unpricedBuckets: bucketRows.length - priced.length,
@@ -346,10 +375,11 @@ function roleInvoices(
   names: Map<string, string>,
   counterpartyId: (invoice: MarketInvoice) => string,
   rate: number | null,
+  today: string,
 ): CompanyRole {
   const rows = [...invoices].sort((left, right) => right.dueDate.localeCompare(left.dueDate) || left.documentId.localeCompare(right.documentId))
   return {
-    stats: invoiceStats(rows, rate),
+    stats: invoiceStats(rows, rate, today),
     invoices: rows.map((invoice) => ({
       id: invoice.id,
       documentId: invoice.documentId,
@@ -357,7 +387,7 @@ function roleInvoices(
       faceValue: invoice.faceValue,
       currency: invoice.currency,
       riskScore: invoice.riskScore,
-      tenorDays: tenorDays(invoice.originationDate, invoice.dueDate),
+      tenorDays: tenorDays(today, invoice.dueDate),
       dueDate: invoice.dueDate,
       repaid: invoice.repaid,
     })),
@@ -372,6 +402,7 @@ export async function loadCompanyProfile(id: string): Promise<CompanyProfile | n
   const names = new Map(loaded.organisations.map((org) => [org.id, org.legalName]))
   const related = loaded.invoices.filter((invoice) => invoice.sellerId === id || invoice.obligorId === id)
   const lines = await loadLines(related.map((invoice) => invoice.id))
+  const today = new Date().toISOString().slice(0, 10)
   return {
     organisation,
     usdRate,
@@ -381,6 +412,7 @@ export async function loadCompanyProfile(id: string): Promise<CompanyProfile | n
       names,
       (invoice) => invoice.obligorId,
       usdRate,
+      today,
     ),
     obligor: roleInvoices(
       related.filter((invoice) => invoice.obligorId === id),
@@ -388,6 +420,7 @@ export async function loadCompanyProfile(id: string): Promise<CompanyProfile | n
       names,
       (invoice) => invoice.sellerId,
       usdRate,
+      today,
     ),
   }
 }

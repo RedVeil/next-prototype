@@ -12,7 +12,13 @@ export type OrganisationRecord = {
   payment_method_id: string
   method: string
   identifier: string
+  multisig_id: string
+  multisig_address: string
+  multisig_status: string
+  bot_address: string
+  bot_funded: boolean
   available_rlusd: number
+  stored_available_rlusd: number
   portfolio_rlusd: number
   invoices_created: InvoiceActivity
   invoices_traded: InvoiceActivity
@@ -31,6 +37,7 @@ export type UserRecord = {
   role: string
   organisation_id: string
   organisation: string
+  address: string
   created_invoices: string[]
   bought_invoices: string[]
   buckets: string[]
@@ -39,6 +46,7 @@ export type UserRecord = {
 export type InvoiceRecord = {
   id: string
   document_id: string
+  token_address: string
   seller_organisation_id: string
   seller: string
   obligor_organisation_id: string
@@ -89,6 +97,52 @@ export type NamedOrganisation = {
   legal_name: string
 }
 
+export type MultisigWallet = {
+  address: string
+  kind: string
+  weight: number
+  username: string
+}
+
+export type MultisigDestination = {
+  address: string
+  kind: string
+}
+
+export const anyoneCanSend = "anyone"
+
+export type RlusdTrust = "missing" | "none" | "trusted" | "unknown"
+
+export type MultisigRecord = {
+  id: string
+  address: string
+  status: string
+  type: string
+  organisation_id: string
+  organisation: string
+  quorum: number
+  bot_address: string
+  bot_funded: boolean
+  xrp_reserved: string | null
+  xrp_free: string | null
+  xrp_known: boolean
+  rlusd_trust: RlusdTrust
+  signers: MultisigWallet[]
+  destinations: MultisigDestination[]
+}
+
+export type BotRecord = {
+  id: string
+  address: string
+  xrp: string | null
+  xrp_known: boolean
+  rlusd_trust: RlusdTrust
+  multisig_address: string
+  multisig_type: string
+  organisation: string
+  multisig_status: string
+}
+
 export type ScoringParameter = {
   key: string
   label: string
@@ -102,6 +156,8 @@ export type DemoData = {
   investors: NamedOrganisation[]
   invoices: InvoiceRecord[]
   buckets: BucketRecord[]
+  multisigs: MultisigRecord[]
+  bots: BotRecord[]
   features: { id: string; name: string }[]
   parameters: ScoringParameter[]
 }

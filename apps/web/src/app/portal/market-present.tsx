@@ -2,7 +2,7 @@ import type { ReactNode } from "react"
 import { formatAmount, formatApr, formatDateOnly } from "./format"
 import type { CompanyInvoiceRow, CompanyRole } from "./market-data"
 import { MoneyGroup } from "./money-value"
-import { weightedAverage, weightedMedian, type InvoiceStats } from "./market-stats"
+import { type CapacityLevel, type InvoiceStats, type RiskBar, type SoldDay } from "./market-stats"
 
 export function joinList(values: string[]) {
   const cleaned = values.map((value) => value.trim()).filter(Boolean)
@@ -40,17 +40,222 @@ export function formatUsd(value: number | null) {
   return `${formatAmount(value)} USD`
 }
 
-export function weightedRateText(rows: { apr: number; amount: number }[], pick: "average" | "median") {
-  const value = pick === "average" ? weightedAverage(rows) : weightedMedian(rows)
-  return value === null ? "—" : formatApr(value)
-}
-
 function Stat({ label, value }: { label: string; value: ReactNode }) {
   return (
     <section className="rounded-lg border border-border bg-white p-5">
       <p className="text-xs font-medium tracking-wide text-neutral-500 uppercase">{label}</p>
       <div className="mt-2 text-2xl font-semibold tracking-tight tabular-nums">{value}</div>
     </section>
+  )
+}
+
+export function CapacityChart({
+  levels,
+  label,
+  mark,
+}: {
+  levels: CapacityLevel[]
+  label: string
+  mark?: number | null
+}) {
+  const total = levels[levels.length - 1]?.cumulative ?? 0
+  const invoiceSum = mark !== null && mark !== undefined && Number.isFinite(mark) && mark > 0 ? mark : null
+  if (levels.length === 0 || total <= 0) return null
+  const width = 640
+  const height = 220
+  const pad = { l: 76, r: 16, t: 16, b: 36 }
+  const plotW = width - pad.l - pad.r
+  const plotH = height - pad.t - pad.b
+  const ceiling = Math.max(total, invoiceSum ?? 0)
+  const slot = plotW / levels.length
+  const barW = Math.min(48, Math.max(8, slot * 0.62))
+  const ticks = [ceiling, ceiling / 2, 0]
+  const labelEvery = Math.max(1, Math.ceil(levels.length / 10))
+
+  function yAt(value: number) {
+    return pad.t + ((ceiling - value) / ceiling) * plotH
+  }
+
+  function barX(index: number) {
+    return pad.l + slot * index + (slot - barW) / 2
+  }
+
+  const base = pad.t + plotH
+
+  return (
+    <div className="mt-4 rounded-lg border border-border bg-white p-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="text-xs font-medium tracking-wide text-neutral-500 uppercase">{label}</p>
+        <p className="flex items-center gap-3 text-xs text-neutral-500">
+          <span className="inline-flex items-center gap-1.5">
+            <span className="inline-block size-2.5 rounded-sm bg-neutral-900" />
+            At this APR
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <span className="inline-block size-2.5 rounded-sm bg-neutral-300" />
+            Lower APRs
+          </span>
+          {invoiceSum !== null ? (
+            <span className="inline-flex items-center gap-1.5">
+              <span className="inline-block h-0.5 w-3.5 bg-red-700" />
+              Eligible invoices
+            </span>
+          ) : null}
+        </p>
+      </div>
+      <svg viewBox={`0 0 ${width} ${height}`} className="mt-3 h-52 w-full" role="img" aria-label={label}>
+        {ticks.map((tick) => (
+          <g key={tick}>
+            <line x1={pad.l} x2={width - pad.r} y1={yAt(tick)} y2={yAt(tick)} stroke="#e7e5e4" strokeWidth="1" />
+            <text x={pad.l - 8} y={yAt(tick) + 4} textAnchor="end" fill="#737373" fontSize="11">
+              {formatAmount(tick)}
+            </text>
+          </g>
+        ))}
+        {levels.map((level, index) => {
+          const x = barX(index)
+          const top = yAt(level.cumulative)
+          const split = yAt(level.cumulative - level.amount)
+          const priorH = Math.max(base - split, 0)
+          const sizeH = Math.max(split - top, 1)
+          const showLabel = index % labelEvery === 0 || index === levels.length - 1
+          return (
+            <g key={level.apr}>
+              <title>
+                {`${formatApr(level.apr)} · ${formatUsd(level.amount)} at this APR · ${formatUsd(level.cumulative)} total`}
+              </title>
+              {priorH > 0 ? <rect x={x} y={split} width={barW} height={priorH} fill="#d6d3d1" /> : null}
+              <rect x={x} y={top} width={barW} height={sizeH} rx={priorH > 0 ? 0 : 2} fill="#171717" />
+              {showLabel ? (
+                <text x={x + barW / 2} y={height - 10} textAnchor="middle" fill="#737373" fontSize="11">
+                  {formatApr(level.apr)}
+                </text>
+              ) : null}
+            </g>
+          )
+        })}
+        {invoiceSum !== null ? (
+          <g>
+            <title>{`Eligible invoices · ${formatUsd(invoiceSum)}`}</title>
+            <line
+              x1={pad.l}
+              x2={width - pad.r}
+              y1={yAt(invoiceSum)}
+              y2={yAt(invoiceSum)}
+              stroke="#b91c1c"
+              strokeWidth="1.5"
+              strokeDasharray="4 3"
+            />
+            <text
+              x={width - pad.r}
+              y={yAt(invoiceSum) < pad.t + 14 ? yAt(invoiceSum) + 14 : yAt(invoiceSum) - 6}
+              textAnchor="end"
+              fill="#b91c1c"
+              fontSize="11"
+            >
+              {formatAmount(invoiceSum)}
+            </text>
+          </g>
+        ) : null}
+      </svg>
+    </div>
+  )
+}
+
+function AmountBars({
+  points,
+  label,
+  eachTick,
+}: {
+  points: { id: string; amount: number; tick: string }[]
+  label: string
+  eachTick: boolean
+}) {
+  if (points.length === 0) return null
+  const width = 640
+  const height = 220
+  const pad = { l: 76, r: 16, t: 28, b: 36 }
+  const plotW = width - pad.l - pad.r
+  const plotH = height - pad.t - pad.b
+  const max = Math.max(...points.map((point) => point.amount))
+  const ceiling = max > 0 ? max : 1
+  const slot = plotW / points.length
+  const barW = Math.min(36, Math.max(4, slot * 0.62))
+  const ticks = [ceiling, ceiling / 2, 0]
+  const labelEvery = eachTick ? Math.max(1, Math.ceil(points.length / 10)) : points.length
+
+  function yAt(value: number) {
+    return pad.t + ((ceiling - value) / ceiling) * plotH
+  }
+
+  function barX(index: number) {
+    return pad.l + slot * index + (slot - barW) / 2
+  }
+
+  return (
+    <div className="mt-4 rounded-lg border border-border bg-white p-5">
+      <p className="text-xs font-medium tracking-wide text-neutral-500 uppercase">{label}</p>
+      <svg viewBox={`0 0 ${width} ${height}`} className="mt-3 h-52 w-full" role="img" aria-label={label}>
+        {ticks.map((tick) => (
+          <g key={tick}>
+            <line x1={pad.l} x2={width - pad.r} y1={yAt(tick)} y2={yAt(tick)} stroke="#e7e5e4" strokeWidth="1" />
+            <text x={pad.l - 8} y={yAt(tick) + 4} textAnchor="end" fill="#737373" fontSize="11">
+              {formatAmount(tick)}
+            </text>
+          </g>
+        ))}
+        {points.map((point, index) => {
+          const x = barX(index)
+          const y = yAt(point.amount)
+          const showTick = eachTick && (index % labelEvery === 0 || index === points.length - 1)
+          return (
+            <g key={point.id}>
+              <title>{`${point.tick} · ${formatUsd(point.amount)}`}</title>
+              <rect x={x} y={y} width={barW} height={Math.max(pad.t + plotH - y, 1)} rx="2" fill="#171717" />
+              {showTick ? (
+                <text x={x + barW / 2} y={height - 10} textAnchor="middle" fill="#737373" fontSize="11">
+                  {point.tick}
+                </text>
+              ) : null}
+            </g>
+          )
+        })}
+        {eachTick ? null : points.length === 1 ? (
+          <text x={barX(0) + barW / 2} y={height - 10} textAnchor="middle" fill="#737373" fontSize="11">
+            {points[0]?.tick}
+          </text>
+        ) : (
+          <>
+            <text x={barX(0)} y={height - 10} textAnchor="start" fill="#737373" fontSize="11">
+              {points[0]?.tick}
+            </text>
+            <text x={barX(points.length - 1) + barW} y={height - 10} textAnchor="end" fill="#737373" fontSize="11">
+              {points[points.length - 1]?.tick}
+            </text>
+          </>
+        )}
+      </svg>
+    </div>
+  )
+}
+
+export function AmountByDayChart({ points, label }: { points: SoldDay[]; label: string }) {
+  return (
+    <AmountBars
+      label={label}
+      eachTick={false}
+      points={points.map((point) => ({ id: point.date, amount: point.amount, tick: formatDateOnly(point.date) }))}
+    />
+  )
+}
+
+export function FaceByRiskChart({ points }: { points: RiskBar[] }) {
+  return (
+    <AmountBars
+      label="Face by risk"
+      eachTick
+      points={points.map((point) => ({ id: String(point.score), amount: point.amount, tick: formatScore(point.score) }))}
+    />
   )
 }
 

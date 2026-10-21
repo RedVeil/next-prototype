@@ -4,7 +4,18 @@ import { useActionState, useCallback, useEffect, useRef, useState, type Keyboard
 import { scoreRisk } from "@/app/risk/actions"
 import { acceptInvoice, repayInvoice, updateMatching } from "./actions"
 import { BucketForm, FundsForm, InvoiceForm, ManualScoreForm, OrganisationForm, UserForm, WeightsForm } from "./forms"
-import type { BucketRecord, DemoData, InvoiceRecord, OrganisationRecord, UserRecord } from "./types"
+import { ConnectWallet, DepositForm, FinishSetup, FundAccount, MultisigForm, SignerForm, TrustRlusd } from "./multisig"
+import {
+  anyoneCanSend,
+  type BucketRecord,
+  type DemoData,
+  type InvoiceRecord,
+  type MultisigDestination,
+  type MultisigRecord,
+  type MultisigWallet,
+  type OrganisationRecord,
+  type UserRecord,
+} from "./types"
 
 const addButton =
   "rounded-lg bg-foreground px-3 py-2 text-sm font-medium text-background"
@@ -17,6 +28,8 @@ const tabs = [
   { id: "users", kind: "user", label: "Users", add: "Add user" },
   { id: "invoices", kind: "invoice", label: "Invoices", add: "Add invoice" },
   { id: "buckets", kind: "bucket", label: "Buckets", add: "Add bucket" },
+  { id: "multisigs", label: "Multisigs" },
+  { id: "bots", label: "Bots" },
 ] as const
 
 type Tab = (typeof tabs)[number]["id"]
@@ -28,13 +41,21 @@ type Modal =
   | { kind: "bucket"; record: BucketRecord | null }
   | { kind: "funds"; organisation: OrganisationRecord }
   | { kind: "score"; organisation: OrganisationRecord }
+  | { kind: "multisig" }
+  | { kind: "signers"; multisig: MultisigRecord }
+  | { kind: "deposits"; multisig: MultisigRecord }
 
 function modalKey(modal: Modal) {
+  if (modal.kind === "multisig") return "multisig"
+  if (modal.kind === "signers" || modal.kind === "deposits") return `${modal.kind}-${modal.multisig.id}`
   if (modal.kind === "funds" || modal.kind === "score") return `${modal.kind}-${modal.organisation.id}`
   return `${modal.kind}-${modal.record?.id ?? "new"}`
 }
 
 function modalTitle(modal: Modal) {
+  if (modal.kind === "signers") return "Change signers"
+  if (modal.kind === "deposits") return "Who can send"
+  if (modal.kind === "multisig") return "Add multisig"
   if (modal.kind === "funds") return `Funds for ${modal.organisation.legal_name}`
   if (modal.kind === "score") return `Score for ${modal.organisation.legal_name}`
   if (modal.kind === "organisation") return modal.record ? "Edit organisation" : "New organisation"
@@ -105,6 +126,49 @@ function FormDialog({
 function Items({ values }: { values: string[] }) {
   if (values.length === 0) return <span className="text-muted">None</span>
   return <span className="block max-w-56 whitespace-normal break-words">{values.join(", ")}</span>
+}
+
+function Address({ value }: { value: string }) {
+  if (!value) return <span className="text-muted">None</span>
+  return <span className="block max-w-56 font-mono text-xs break-all">{value}</span>
+}
+
+function SignerList({ wallets }: { wallets: MultisigWallet[] }) {
+  if (wallets.length === 0) return <span className="text-muted">None</span>
+  return (
+    <ul className="max-w-64 space-y-1">
+      {wallets.map((wallet) => (
+        <li key={`${wallet.kind}-${wallet.address}-${wallet.username}`}>
+          <Address value={wallet.address} />
+          <span className="text-muted">
+            {wallet.kind}
+            {wallet.username ? ` · ${wallet.username}` : ""} · weight {wallet.weight}
+          </span>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+function BotXrp({ bot }: { bot: { address: string; xrp: string | null; xrp_known: boolean } }) {
+  if (!bot.address) return <span className="text-muted">None</span>
+  if (!bot.xrp_known) return <span className="text-muted">Unknown</span>
+  if (bot.xrp === null) return <span className="text-muted">Unfunded</span>
+  return <span className="whitespace-nowrap">{bot.xrp} XRP</span>
+}
+
+function DestinationList({ wallets }: { wallets: MultisigDestination[] }) {
+  if (wallets.length === 0) return <span className="text-muted">None</span>
+  return (
+    <ul className="max-w-64 space-y-1">
+      {wallets.map((wallet, index) => (
+        <li key={`${wallet.kind}-${wallet.address}-${index}`}>
+          {wallet.address ? <Address value={wallet.address} /> : <span className="text-muted">Unset</span>}
+          <div className="text-muted">{wallet.kind}</div>
+        </li>
+      ))}
+    </ul>
+  )
 }
 
 function signed(value: number) {
@@ -259,7 +323,11 @@ function openFromKeyboard(event: KeyboardEvent<HTMLTableRowElement>, open: () =>
 export function DemoBrowser({ data }: { data: DemoData }) {
   const [tab, setTab] = useState<Tab>("organisations")
   const [modal, setModal] = useState<Modal | null>(null)
+  const [selectedBotId, setSelectedBotId] = useState<string | null>(null)
+  const [selectedMultisigId, setSelectedMultisigId] = useState<string | null>(null)
   const close = useCallback(() => setModal(null), [])
+  const selectedBot = data.bots.find((bot) => bot.id === selectedBotId) ?? null
+  const selectedMultisig = data.multisigs.find((multisig) => multisig.id === selectedMultisigId) ?? null
   const current = tabs.find((item) => item.id === tab) ?? tabs[0]
   const names = data.organisations.map((organisation) => ({
     id: organisation.id,
@@ -288,14 +356,31 @@ export function DemoBrowser({ data }: { data: DemoData }) {
         })}
       </div>
       <div className="flex flex-wrap items-center gap-3">
-        <button
-          type="button"
-          className={addButton}
-          onClick={() => setModal({ kind: current.kind, record: null })}
-        >
-          {current.add}
-        </button>
+        {"add" in current ? (
+          <button
+            type="button"
+            className={addButton}
+            onClick={() => setModal({ kind: current.kind, record: null })}
+          >
+            {current.add}
+          </button>
+        ) : null}
+        {tab === "organisations" || tab === "multisigs" ? (
+          <>
+            <button type="button" className={addButton} onClick={() => setModal({ kind: "multisig" })}>
+              Add multisig
+            </button>
+            {tab === "multisigs" ? <FundAccount destination={selectedMultisig?.address ?? ""} label="Fund multisig" /> : null}
+            <ConnectWallet />
+          </>
+        ) : null}
         {tab === "invoices" ? <UpdateMatching /> : null}
+        {tab === "bots" ? (
+          <>
+            <FundAccount destination={selectedBot?.address ?? ""} label="Fund bot" />
+            <ConnectWallet />
+          </>
+        ) : null}
       </div>
       <section className="overflow-x-auto rounded-2xl border border-border bg-surface">
         {tab === "organisations" ? (
@@ -310,12 +395,13 @@ export function DemoBrowser({ data }: { data: DemoData }) {
                 <th className={th}>Invoices created</th>
                 <th className={th}>Bought − sold</th>
                 <th className={th}>Invoices repaid</th>
+                <th className={th}>Multisig</th>
               </tr>
             </thead>
             <tbody>
               {data.organisations.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className={`${td} text-muted`}>
+                  <td colSpan={9} className={`${td} text-muted`}>
                     None yet.
                   </td>
                 </tr>
@@ -369,6 +455,21 @@ export function DemoBrowser({ data }: { data: DemoData }) {
                   <td className={`${td} whitespace-nowrap`}>
                     <Activity activity={organisation.invoices_repaid} />
                   </td>
+                  <td className={td}>
+                    {organisation.multisig_address ? (
+                      <div>
+                        <div className="max-w-56 font-mono text-xs break-all">{organisation.multisig_address}</div>
+                        <div className="max-w-56 font-mono text-xs break-all text-muted">{organisation.bot_address}</div>
+                        {organisation.multisig_status === "live" ? (
+                          organisation.bot_address && !organisation.bot_funded ? (
+                            <FinishSetup multisigId={organisation.multisig_id} label="Activate bot" />
+                          ) : null
+                        ) : (
+                          <FinishSetup multisigId={organisation.multisig_id} />
+                        )}
+                      </div>
+                    ) : null}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -382,6 +483,7 @@ export function DemoBrowser({ data }: { data: DemoData }) {
                 <th className={th}>Login</th>
                 <th className={th}>Role</th>
                 <th className={th}>Organisation</th>
+                <th className={th}>XRPL address</th>
                 <th className={th}>Created invoices</th>
                 <th className={th}>Bought invoices</th>
                 <th className={th}>Buckets</th>
@@ -390,7 +492,7 @@ export function DemoBrowser({ data }: { data: DemoData }) {
             <tbody>
               {data.users.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className={`${td} text-muted`}>
+                  <td colSpan={8} className={`${td} text-muted`}>
                     None yet.
                   </td>
                 </tr>
@@ -409,6 +511,9 @@ export function DemoBrowser({ data }: { data: DemoData }) {
                   <td className={td}>{user.login}</td>
                   <td className={td}>{user.role}</td>
                   <td className={td}>{user.organisation}</td>
+                  <td className={`${td} max-w-56 font-mono text-xs break-all`}>
+                    {user.address || <span className="font-sans text-sm text-muted">None</span>}
+                  </td>
                   <td className={td}>
                     <Items values={user.created_invoices} />
                   </td>
@@ -435,12 +540,13 @@ export function DemoBrowser({ data }: { data: DemoData }) {
                 <th className={th}>Currency</th>
                 <th className={th}>Risk score</th>
                 <th className={th}>Offer</th>
+                <th className={th}>Token address</th>
               </tr>
             </thead>
             <tbody>
               {data.invoices.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className={`${td} text-muted`}>
+                  <td colSpan={9} className={`${td} text-muted`}>
                     None yet.
                   </td>
                 </tr>
@@ -465,6 +571,7 @@ export function DemoBrowser({ data }: { data: DemoData }) {
                   <td className={`${td} whitespace-nowrap`}>
                     <InvoiceOffer invoice={invoice} />
                   </td>
+                  <td className={`${td} max-w-56 font-mono text-xs break-all`}>{invoice.token_address}</td>
                 </tr>
               ))}
             </tbody>
@@ -511,6 +618,162 @@ export function DemoBrowser({ data }: { data: DemoData }) {
             </tbody>
           </table>
         ) : null}
+        {tab === "multisigs" ? (
+          <table className="w-full text-left text-sm">
+            <thead className="text-muted">
+              <tr>
+                <th className={th}>Address</th>
+                <th className={th}>Reserved XRP</th>
+                <th className={th}>Free XRP</th>
+                <th className={th}>Status</th>
+                <th className={th}>Type</th>
+                <th className={th}>Organisation</th>
+                <th className={th}>Quorum</th>
+                <th className={th}>Connected wallets</th>
+                <th className={th}>Can interact</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.multisigs.length === 0 ? (
+                <tr>
+                  <td colSpan={9} className={`${td} text-muted`}>
+                    None yet.
+                  </td>
+                </tr>
+              ) : null}
+              {data.multisigs.map((multisig) => (
+                <tr
+                  key={multisig.id}
+                  tabIndex={0}
+                  aria-selected={selectedMultisigId === multisig.id}
+                  className={`${row}${selectedMultisigId === multisig.id ? " bg-background" : ""}`}
+                  onClick={() => setSelectedMultisigId((current) => (current === multisig.id ? null : multisig.id))}
+                  onKeyDown={(event) =>
+                    openFromKeyboard(event, () =>
+                      setSelectedMultisigId((current) => (current === multisig.id ? null : multisig.id)),
+                    )
+                  }
+                >
+                  <td className={td}>
+                    <Address value={multisig.address} />
+                  </td>
+                  <td className={td}>
+                    <BotXrp bot={{ address: multisig.address, xrp: multisig.xrp_reserved, xrp_known: multisig.xrp_known }} />
+                  </td>
+                  <td className={td}>
+                    <BotXrp bot={{ address: multisig.address, xrp: multisig.xrp_free, xrp_known: multisig.xrp_known }} />
+                  </td>
+                  <td className={td}>
+                    {multisig.status}
+                    {multisig.rlusd_trust === "trusted" ? <div className="mt-1 text-xs text-muted">Trusts RLUSD</div> : null}
+                    {multisig.rlusd_trust === "none" && multisig.status === "live" ? (
+                      <TrustRlusd kind="multisig" id={multisig.id} />
+                    ) : null}
+                  </td>
+                  <td className={td}>{multisig.type}</td>
+                  <td className={td}>{multisig.organisation || <span className="text-muted">None</span>}</td>
+                  <td className={td}>
+                    {multisig.quorum} of {Math.max(multisig.signers.length, multisig.quorum)}
+                    {multisig.address && multisig.status !== "live" ? (
+                      <FinishSetup multisigId={multisig.id} />
+                    ) : null}
+                    {multisig.status === "live" && multisig.bot_address && !multisig.bot_funded ? (
+                      <FinishSetup multisigId={multisig.id} label="Activate bot" />
+                    ) : null}
+                    {multisig.status === "live" ? (
+                      <button
+                        type="button"
+                        className="mt-2 block rounded-lg border border-border px-2 py-1 text-xs"
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          setModal({ kind: "signers", multisig })
+                        }}
+                      >
+                        Change signers
+                      </button>
+                    ) : null}
+                  </td>
+                  <td className={td}>
+                    <SignerList wallets={multisig.signers} />
+                  </td>
+                  <td className={td}>
+                    {multisig.destinations.some((destination) => destination.address === anyoneCanSend) ? (
+                      "Anyone"
+                    ) : (
+                      <DestinationList wallets={multisig.destinations} />
+                    )}
+                    {multisig.status === "live" ? (
+                      <button
+                        type="button"
+                        className="mt-2 block rounded-lg border border-border px-2 py-1 text-xs"
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          setModal({ kind: "deposits", multisig })
+                        }}
+                      >
+                        Change senders
+                      </button>
+                    ) : null}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : null}
+        {tab === "bots" ? (
+          <table className="w-full text-left text-sm">
+            <thead className="text-muted">
+              <tr>
+                <th className={th}>Address</th>
+                <th className={th}>XRP</th>
+                <th className={th}>Multisig</th>
+                <th className={th}>Type</th>
+                <th className={th}>Organisation</th>
+                <th className={th}>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.bots.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className={`${td} text-muted`}>
+                    None yet.
+                  </td>
+                </tr>
+              ) : null}
+              {data.bots.map((bot) => (
+                <tr
+                  key={bot.id}
+                  tabIndex={0}
+                  aria-selected={selectedBotId === bot.id}
+                  className={`${row}${selectedBotId === bot.id ? " bg-background" : ""}`}
+                  onClick={() => setSelectedBotId((current) => (current === bot.id ? null : bot.id))}
+                  onKeyDown={(event) =>
+                    openFromKeyboard(event, () =>
+                      setSelectedBotId((current) => (current === bot.id ? null : bot.id)),
+                    )
+                  }
+                >
+                  <td className={td}>
+                    <Address value={bot.address} />
+                  </td>
+                  <td className={td}>
+                    <BotXrp bot={bot} />
+                  </td>
+                  <td className={td}>
+                    <Address value={bot.multisig_address} />
+                  </td>
+                  <td className={td}>{bot.multisig_type || <span className="text-muted">None</span>}</td>
+                  <td className={td}>{bot.organisation || <span className="text-muted">None</span>}</td>
+                  <td className={td}>
+                    {bot.multisig_status || <span className="text-muted">None</span>}
+                    {bot.rlusd_trust === "trusted" ? <div className="mt-1 text-xs text-muted">Trusts RLUSD</div> : null}
+                    {bot.rlusd_trust === "none" ? <TrustRlusd kind="bot" id={bot.id} /> : null}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : null}
       </section>
       {modal ? (
         <FormDialog key={modalKey(modal)} title={modalTitle(modal)} onClose={close}>
@@ -523,6 +786,29 @@ export function DemoBrowser({ data }: { data: DemoData }) {
           ) : null}
           {modal.kind === "user" ? (
             <UserForm organisations={names} initial={modal.record} onSaved={close} />
+          ) : null}
+          {modal.kind === "signers" ? (
+            <SignerForm multisig={modal.multisig} users={data.users} onSaved={close} />
+          ) : null}
+          {modal.kind === "deposits" ? (
+            <DepositForm
+              multisig={modal.multisig}
+              users={data.users}
+              multisigs={data.multisigs}
+              onSaved={close}
+            />
+          ) : null}
+          {modal.kind === "multisig" ? (
+            <MultisigForm
+              organisations={data.organisations
+                .filter((organisation) => !organisation.multisig_address)
+                .map((organisation) => ({ id: organisation.id, legal_name: organisation.legal_name }))}
+              users={data.users}
+              central={data.multisigs
+                .filter((multisig) => multisig.type !== "org")
+                .map((multisig) => ({ type: multisig.type, address: multisig.address }))}
+              onSaved={close}
+            />
           ) : null}
           {modal.kind === "invoice" ? (
             <InvoiceForm organisations={names} initial={modal.record} onSaved={close} />

@@ -2,7 +2,13 @@
 
 import { revalidatePath } from "next/cache"
 import { createBucket, createInvoice, updateBucket, acceptInvoice, type ActionState } from "@/app/sandbox/actions"
-import { roundMoney } from "@/app/sandbox/settle"
+import {
+  prepareInvestorTransfer,
+  recordInvestorDeposit,
+  submitInvestorWithdrawal,
+  type FundsPreparation,
+  type FundsResult,
+} from "@/portfolio/funds"
 import { createServiceClient } from "@/lib/supabase/service"
 import { portalSession } from "./session"
 
@@ -31,64 +37,21 @@ function refreshPortals() {
   revalidatePath("/match")
 }
 
-export async function moveFunds(_state: ActionState, formData: FormData): Promise<ActionState> {
-  const investor = await investorOrganisation()
-  if ("error" in investor) return investor
-  const kind = text(formData, "kind")
-  const amount = Number(text(formData, "amount"))
-  if (kind !== "deposit" && kind !== "withdrawal") return { error: "Choose deposit or withdraw." }
-  if (!Number.isFinite(amount) || amount <= 0) return { error: "Amount must be greater than zero." }
+function refreshFunds(result: FundsResult) {
+  if (result.message || result.recorded) refreshPortals()
+  return result
+}
 
-  const supabase = createServiceClient()
-  const { data: latest, error: latestError } = await supabase
-    .from("organisation_portfolio_snapshots")
-    .select("available_rlusd, reserved_rlusd, outstanding_rlusd, portfolio_rlusd")
-    .eq("organisation_id", investor.organisationId)
-    .order("captured_at", { ascending: false })
-    .limit(1)
-    .maybeSingle()
-  if (latestError) return { error: latestError.message }
+export async function prepareFunds(kind: string, amount: number): Promise<FundsPreparation> {
+  return prepareInvestorTransfer(kind, amount)
+}
 
-  const available = Number(latest?.available_rlusd ?? 0)
-  const portfolio = Number(latest?.portfolio_rlusd ?? 0)
-  const reserved = Number(latest?.reserved_rlusd ?? 0)
-  const outstanding = Number(latest?.outstanding_rlusd ?? 0)
-  if (kind === "withdrawal" && roundMoney(available - amount) < 0) {
-    return { error: "Withdrawal cannot exceed available RLUSD." }
-  }
+export async function recordDeposit(hash: string): Promise<FundsResult> {
+  return refreshFunds(await recordInvestorDeposit(hash))
+}
 
-  const nextAvailable = kind === "deposit" ? available + amount : available - amount
-  const nextPortfolio = kind === "deposit" ? portfolio + amount : portfolio - amount
-  const { data: movement, error: movementError } = await supabase
-    .from("organisation_cash_movements")
-    .insert({
-      organisation_id: investor.organisationId,
-      kind,
-      amount: roundMoney(amount),
-    })
-    .select("id")
-    .single()
-  if (movementError) {
-    if (movementError.message.includes("organisation_cash_movements")) {
-      return { error: "Deposits and withdrawals stay closed until the cash movements table is created." }
-    }
-    return { error: movementError.message }
-  }
-
-  const { error: snapshotError } = await supabase.from("organisation_portfolio_snapshots").insert({
-    organisation_id: investor.organisationId,
-    available_rlusd: roundMoney(nextAvailable),
-    reserved_rlusd: roundMoney(reserved),
-    outstanding_rlusd: roundMoney(outstanding),
-    portfolio_rlusd: roundMoney(Math.max(0, nextPortfolio)),
-  })
-  if (snapshotError) {
-    await supabase.from("organisation_cash_movements").delete().eq("id", movement.id)
-    return { error: snapshotError.message }
-  }
-
-  refreshPortals()
-  return { message: kind === "deposit" ? "Deposit recorded." : "Withdrawal recorded." }
+export async function submitWithdrawal(blob: string): Promise<FundsResult> {
+  return refreshFunds(await submitInvestorWithdrawal(blob))
 }
 
 async function ownBucket(organisationId: string, id: string) {

@@ -4,12 +4,20 @@ import { frankfurterRate } from "@/app/match/rate"
 import { loadBucketFeatureLinks } from "@/lib/bucket-features"
 import { createServiceClient } from "@/lib/supabase/service"
 import { DemoBrowser, RiskToolbar } from "./browser"
+import { rlusdBalances, rlusdTrustLines } from "@/portfolio/balances"
+import { reservedXrp, xrpBalances } from "./ledger"
+import { WalletProviders } from "./wallet-provider"
 import { toRlusd } from "./settle"
 import type {
+  BotRecord,
   BucketRecord,
   DemoData,
   InvoiceRecord,
+  MultisigDestination,
+  MultisigRecord,
+  MultisigWallet,
   OrganisationRecord,
+  RlusdTrust,
   UserRecord,
 } from "./types"
 
@@ -104,6 +112,11 @@ async function loadSandbox(): Promise<DemoData> {
     identities,
     members,
     roles,
+    multisigs,
+    bots,
+    allMultisigs,
+    signers,
+    destinations,
     snapshots,
     invoices,
     lines,
@@ -120,9 +133,17 @@ async function loadSandbox(): Promise<DemoData> {
     supabase.from("industries").select("id, name").order("name"),
     supabase.from("organisation_currencies").select("organisation_id, currency, use"),
     supabase.from("payment_methods").select("id, organisation_id, method, identifier").order("id"),
-    supabase.from("identities").select("id, username, login, created_at").order("created_at", { ascending: false }),
+    supabase.from("identities").select("id, username, login, xrpl_address, created_at").order("created_at", { ascending: false }),
     supabase.from("organisation_members").select("id, identity_id, organisation_id"),
     supabase.from("membership_roles").select("member_id, role"),
+    supabase.from("multisigs").select("id, organisation_id, address, status, type").eq("type", "org"),
+    supabase.from("bots").select("id, multisig_id, address"),
+    supabase
+      .from("multisigs")
+      .select("id, organisation_id, address, status, type, quorum, created_at")
+      .order("created_at", { ascending: false }),
+    supabase.from("org_multisig_signers").select("multisig_id, address, weight, kind, identity_id"),
+    supabase.from("org_multisig_destinations").select("multisig_id, address, kind"),
     supabase
       .from("organisation_portfolio_snapshots")
       .select("organisation_id, available_rlusd, portfolio_rlusd, captured_at")
@@ -130,7 +151,7 @@ async function loadSandbox(): Promise<DemoData> {
     supabase
       .from("organisation_invoices")
       .select(
-        "id, document_id, seller_organisation_id, obligor_organisation_id, buyer_organisation_id, face_value, currency, risk_score, sold_price, repayment_amount, repaid, origination_date, due_date, created_at",
+        "id, document_id, mpt_issuance_id, seller_organisation_id, obligor_organisation_id, buyer_organisation_id, face_value, currency, risk_score, sold_price, repayment_amount, repaid, origination_date, due_date, created_at",
       )
       .order("created_at", { ascending: false }),
     supabase.from("organisation_invoice_lines").select("id, invoice_id, product, amount, unit").order("id"),
@@ -154,6 +175,11 @@ async function loadSandbox(): Promise<DemoData> {
     identities,
     members,
     roles,
+    multisigs,
+    bots,
+    allMultisigs,
+    signers,
+    destinations,
     snapshots,
     invoices,
     lines,
@@ -185,6 +211,25 @@ async function loadSandbox(): Promise<DemoData> {
     })
   }
 
+  const botByMultisig = new Map<string, string>()
+  for (const row of bots.data ?? []) {
+    const multisigId = row.multisig_id as string | null
+    if (!multisigId || botByMultisig.has(multisigId)) continue
+    botByMultisig.set(multisigId, (row.address as string | null) ?? "")
+  }
+  const multisigByOrg = new Map<string, { id: string; address: string; status: string; bot: string }>()
+  for (const row of multisigs.data ?? []) {
+    const organisationId = row.organisation_id as string | null
+    if (!organisationId || multisigByOrg.has(organisationId)) continue
+    const id = row.id as string
+    multisigByOrg.set(organisationId, {
+      id,
+      address: (row.address as string | null) ?? "",
+      status: row.status as string,
+      bot: botByMultisig.get(id) ?? "",
+    })
+  }
+
   const fundsByOrg = new Map<string, { available_rlusd: number; portfolio_rlusd: number }>()
   for (const row of snapshots.data ?? []) {
     const organisationId = row.organisation_id as string
@@ -195,10 +240,72 @@ async function loadSandbox(): Promise<DemoData> {
     })
   }
 
+  const botAddresses = [
+    ...new Set(
+      (bots.data ?? []).map((row) => (row.address as string | null) ?? "").filter((address) => address.length > 0),
+    ),
+  ]
+  const multisigAddresses = [...multisigByOrg.values()].map((row) => row.address).filter((address) => address.length > 0)
+  const trustAddresses = [
+    ...new Set([
+      ...botAddresses,
+      ...(allMultisigs.data ?? [])
+        .map((row) => (row.address as string | null) ?? "")
+        .filter((address) => address.length > 0),
+    ]),
+  ]
+  const multisigReserveAddresses = [
+    ...new Set(
+      (allMultisigs.data ?? [])
+        .map((row) => (row.address as string | null) ?? "")
+        .filter((address) => address.length > 0),
+    ),
+  ]
+  let xrpByAddress = new Map<string, string | null>()
+  let xrpKnown = false
+  let reservedByAddress = new Map<string, { reserved: string; free: string } | null>()
+  let reserveKnown = false
+  let rlusdByAddress = new Map<string, number>()
+  let rlusdKnown = false
+  let trustByAddress = new Map<string, Exclude<RlusdTrust, "unknown">>()
+  let trustKnown = false
+  try {
+    if (botAddresses.length > 0) xrpByAddress = await xrpBalances(botAddresses)
+    xrpKnown = true
+  } catch {
+    xrpKnown = false
+  }
+  try {
+    if (multisigReserveAddresses.length > 0) reservedByAddress = await reservedXrp(multisigReserveAddresses)
+    reserveKnown = true
+  } catch {
+    reserveKnown = false
+  }
+  try {
+    if (multisigAddresses.length > 0) rlusdByAddress = await rlusdBalances(multisigAddresses)
+    rlusdKnown = true
+  } catch {
+    rlusdKnown = false
+  }
+  try {
+    if (trustAddresses.length > 0) trustByAddress = await rlusdTrustLines(trustAddresses)
+    trustKnown = true
+  } catch {
+    trustKnown = false
+  }
+
+  function trustOf(address: string): RlusdTrust {
+    if (!address) return "missing"
+    if (!trustKnown) return "unknown"
+    return trustByAddress.get(address) ?? "missing"
+  }
+
   const organisationRows: OrganisationRecord[] = (organisations.data ?? []).map((row) => {
     const id = row.id as string
     const payment = paymentByOrg.get(id)
     const funds = fundsByOrg.get(id)
+    const multisigAddress = multisigByOrg.get(id)?.address ?? ""
+    const liveAvailable = multisigAddress && rlusdKnown ? rlusdByAddress.get(multisigAddress) : undefined
     return {
       id,
       legal_name: row.legal_name as string,
@@ -213,7 +320,13 @@ async function loadSandbox(): Promise<DemoData> {
       payment_method_id: payment?.id ?? "",
       method: payment?.method ?? "",
       identifier: payment?.identifier ?? "",
-      available_rlusd: funds?.available_rlusd ?? 0,
+      multisig_id: multisigByOrg.get(id)?.id ?? "",
+      multisig_address: multisigByOrg.get(id)?.address ?? "",
+      multisig_status: multisigByOrg.get(id)?.status ?? "",
+      bot_address: multisigByOrg.get(id)?.bot ?? "",
+      bot_funded: !xrpKnown || xrpByAddress.get(multisigByOrg.get(id)?.bot ?? "") != null,
+      available_rlusd: liveAvailable ?? funds?.available_rlusd ?? 0,
+      stored_available_rlusd: funds?.available_rlusd ?? 0,
       portfolio_rlusd: funds?.portfolio_rlusd ?? 0,
       invoices_created: emptyActivity(),
       invoices_traded: emptyActivity(),
@@ -266,6 +379,7 @@ async function loadSandbox(): Promise<DemoData> {
     return {
       id,
       document_id: row.document_id as string,
+      token_address: (row.mpt_issuance_id as string | null) ?? "",
       seller_organisation_id: sellerId,
       seller: organisationName.get(sellerId) ?? "",
       obligor_organisation_id: obligorId,
@@ -335,6 +449,7 @@ async function loadSandbox(): Promise<DemoData> {
       role,
       organisation_id: organisationId,
       organisation: organisationName.get(organisationId) ?? "",
+      address: (row.xrpl_address as string | null) ?? "",
       created_invoices: createdByOrg.get(organisationId) ?? [],
       bought_invoices: boughtByOrg.get(organisationId) ?? [],
       buckets: bucketsByOrg.get(organisationId) ?? [],
@@ -348,6 +463,70 @@ async function loadSandbox(): Promise<DemoData> {
     invoices_repaid: repaidActivity.get(organisation.id) ?? organisation.invoices_repaid,
   }))
 
+  const usernameByIdentity = new Map(
+    (identities.data ?? []).map((row) => [row.id as string, (row.username as string) ?? ""]),
+  )
+  const signersByMultisig = new Map<string, MultisigWallet[]>()
+  for (const row of signers.data ?? []) {
+    const multisigId = row.multisig_id as string
+    const identityId = (row.identity_id as string | null) ?? ""
+    const list = signersByMultisig.get(multisigId) ?? []
+    list.push({
+      address: (row.address as string | null) ?? "",
+      kind: row.kind as string,
+      weight: num(row.weight),
+      username: identityId ? (usernameByIdentity.get(identityId) ?? "") : "",
+    })
+    signersByMultisig.set(multisigId, list)
+  }
+  const destinationsByMultisig = new Map<string, MultisigDestination[]>()
+  for (const row of destinations.data ?? []) {
+    const multisigId = row.multisig_id as string
+    const list = destinationsByMultisig.get(multisigId) ?? []
+    list.push({
+      address: (row.address as string | null) ?? "",
+      kind: row.kind as string,
+    })
+    destinationsByMultisig.set(multisigId, list)
+  }
+  const multisigRows: MultisigRecord[] = (allMultisigs.data ?? []).map((row) => {
+    const id = row.id as string
+    const organisationId = (row.organisation_id as string | null) ?? ""
+    return {
+      id,
+      address: (row.address as string | null) ?? "",
+      status: row.status as string,
+      type: row.type as string,
+      organisation_id: organisationId,
+      organisation: organisationId ? (organisationName.get(organisationId) ?? "") : "",
+      quorum: num(row.quorum),
+      bot_address: botByMultisig.get(id) ?? "",
+      bot_funded: !xrpKnown || xrpByAddress.get(botByMultisig.get(id) ?? "") != null,
+      xrp_reserved: reserveKnown && (row.address as string | null) ? (reservedByAddress.get((row.address as string) ?? "")?.reserved ?? null) : null,
+      xrp_free: reserveKnown && (row.address as string | null) ? (reservedByAddress.get((row.address as string) ?? "")?.free ?? null) : null,
+      xrp_known: reserveKnown || !(row.address as string | null),
+      rlusd_trust: trustOf((row.address as string | null) ?? ""),
+      signers: signersByMultisig.get(id) ?? [],
+      destinations: destinationsByMultisig.get(id) ?? [],
+    }
+  })
+  const multisigById = new Map(multisigRows.map((row) => [row.id, row]))
+  const botRows: BotRecord[] = (bots.data ?? []).map((row) => {
+    const address = (row.address as string | null) ?? ""
+    const multisig = multisigById.get((row.multisig_id as string | null) ?? "")
+    return {
+      id: row.id as string,
+      address,
+      xrp: xrpKnown && address ? (xrpByAddress.get(address) ?? null) : null,
+      xrp_known: xrpKnown || !address,
+      rlusd_trust: trustOf(address),
+      multisig_address: multisig?.address ?? "",
+      multisig_type: multisig?.type ?? "",
+      organisation: multisig?.organisation ?? "",
+      multisig_status: multisig?.status ?? "",
+    }
+  })
+
   return {
     organisations: organisationsWithActivity,
     industryNames: [...industryName.values()],
@@ -355,6 +534,8 @@ async function loadSandbox(): Promise<DemoData> {
     investors: organisationsWithActivity.filter((row) => investorIds.has(row.id)),
     invoices: invoiceRows,
     buckets: bucketRows,
+    multisigs: multisigRows,
+    bots: botRows,
     features: (features.data ?? []).map((row) => ({ id: row.id as string, name: row.name as string })),
     parameters: (parameters.data ?? []).map((row) => ({
       key: row.key as string,
@@ -362,6 +543,12 @@ async function loadSandbox(): Promise<DemoData> {
       weight: Number(row.weight),
     })),
   }
+}
+
+function walletNetwork(): "mainnet" | "testnet" | "devnet" {
+  const network = process.env.XRPL_NETWORK
+  if (network === "testnet" || network === "devnet") return network
+  return "mainnet"
 }
 
 export default async function SandboxPage() {
@@ -379,15 +566,19 @@ export default async function SandboxPage() {
         <p className="text-sm text-muted">Sandbox</p>
         <h1 className="mt-2 text-2xl font-semibold tracking-tight">Demo data</h1>
         <p className="mt-2 max-w-2xl text-sm text-muted">
-          These forms write the organisation tables. They do not create auth users, send email, or
-          submit anything to XRPL.
+          These forms write the organisation tables. They do not create auth users or send email.
+          Add multisig submits the new account to XRPL.
         </p>
         {data ? <RiskToolbar parameters={data.parameters} /> : null}
       </div>
       {detail ? (
         <p className="rounded-2xl border border-border bg-surface p-6 text-sm text-red-700">{detail}</p>
       ) : null}
-      {data ? <DemoBrowser data={data} /> : null}
+      {data ? (
+        <WalletProviders network={walletNetwork()} xamanApiKey={process.env.XUMM_API_KEY ?? ""}>
+          <DemoBrowser data={data} />
+        </WalletProviders>
+      ) : null}
     </main>
   )
 }

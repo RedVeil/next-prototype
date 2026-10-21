@@ -1,6 +1,6 @@
 import { loadBucketFeatureLinks } from "@/lib/bucket-features"
 import { createServiceClient } from "@/lib/supabase/service"
-import type { MatchBucket, MatchInvoice } from "./match"
+import { earlierSaleCooldownMinutes, type MatchBucket, type MatchInvoice } from "./match"
 
 export type ListedBucket = MatchBucket & {
   features: string[]
@@ -23,7 +23,9 @@ function asList(value: unknown) {
 
 export async function loadCatalogue() {
   const supabase = createServiceClient()
-  const [organisations, links, industries, invoices, buckets, features, linksFeatures, snapshots] =
+  const cooldownMinutes = earlierSaleCooldownMinutes()
+  const failedSince = new Date(Date.now() - cooldownMinutes * 60_000).toISOString()
+  const [organisations, links, industries, invoices, buckets, features, linksFeatures, snapshots, failedSales] =
     await Promise.all([
       supabase.from("organisations").select("id, legal_name, country"),
       supabase.from("organisation_industries").select("organisation_id, industry_id"),
@@ -41,9 +43,18 @@ export async function loadCatalogue() {
         .from("organisation_portfolio_snapshots")
         .select("organisation_id, portfolio_rlusd, captured_at")
         .order("captured_at", { ascending: false }),
+      cooldownMinutes === 0
+        ? Promise.resolve({ data: [], error: null })
+        : supabase
+            .from("sale_orders")
+            .select("invoice_id, buyer_organisation_id, updated_at")
+            .in("status", ["failed", "expired"])
+            .gte("updated_at", failedSince),
     ])
 
-  const failed = [organisations, links, industries, invoices, buckets, features, snapshots].find((result) => result.error)
+  const failed = [organisations, links, industries, invoices, buckets, features, snapshots, failedSales].find(
+    (result) => result.error,
+  )
   if (failed?.error) throw new Error(failed.error.message)
 
   const industryName = new Map((industries.data ?? []).map((row) => [row.id as string, row.name as string]))
@@ -79,14 +90,25 @@ export async function loadCatalogue() {
     if (!portfolioByOrg.has(id)) portfolioByOrg.set(id, asNumber(snapshot.portfolio_rlusd))
   }
 
+  const blockedByInvoice = new Map<string, string[]>()
+  for (const row of failedSales.data ?? []) {
+    const invoiceId = row.invoice_id as string
+    const buyerId = row.buyer_organisation_id as string
+    const buyers = blockedByInvoice.get(invoiceId) ?? []
+    if (!buyers.includes(buyerId)) buyers.push(buyerId)
+    blockedByInvoice.set(invoiceId, buyers)
+  }
+
   const listedInvoices: MatchInvoice[] = (invoices.data ?? []).map((row) => {
     const sellerId = row.seller_organisation_id as string
+    const invoiceId = row.id as string
     return {
-      id: row.id as string,
+      id: invoiceId,
       documentId: row.document_id as string,
       seller: organisationName.get(sellerId) ?? "Seller",
       obligor: organisationName.get(row.obligor_organisation_id as string) ?? "Obligor",
       buyerOrganisationId: (row.buyer_organisation_id as string | null) ?? null,
+      blockedBuyerIds: blockedByInvoice.get(invoiceId) ?? [],
       repaid: Boolean(row.repaid),
       dueDate: row.due_date as string,
       createdAt: row.created_at as string,

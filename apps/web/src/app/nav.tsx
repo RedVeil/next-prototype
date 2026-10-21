@@ -11,7 +11,10 @@ const links = [
     href: "/sandbox",
     label: "Admin",
     active: (pathname: string) =>
-      pathname === "/" || pathname.startsWith("/sandbox") || pathname.startsWith("/match"),
+      pathname === "/" ||
+      pathname.startsWith("/sandbox") ||
+      pathname.startsWith("/match") ||
+      pathname.startsWith("/sales"),
   },
   {
     href: "/investor",

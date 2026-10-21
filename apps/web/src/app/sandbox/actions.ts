@@ -6,7 +6,25 @@ import { runMatch } from "@/app/match/match"
 import { frankfurterRate } from "@/app/match/rate"
 import { invoiceScore } from "@/app/risk/score"
 import { createServiceClient } from "@/lib/supabase/service"
-import { repaymentOf, roundMoney, toRlusd } from "./settle"
+import {
+  changeMultisigDeposits,
+  changeMultisigSigners,
+  finishOrgMultisig,
+  prepareCentralMultisig,
+  prepareOrgMultisig,
+  trustBotRlusd,
+  trustMultisigRlusd,
+  type DepositChange,
+  type FundingPayment,
+  type LedgerChange,
+  type SignerChange,
+} from "./ledger"
+import { isValidClassicAddress } from "xrpl"
+import { repaySoldInvoice } from "@/sale/repay"
+import { roundMoney, toRlusd } from "./settle"
+import { anyoneCanSend } from "./types"
+
+export type { FundingPayment }
 
 export type ActionState = { error?: string; message?: string } | null
 
@@ -257,6 +275,7 @@ function readUser(formData: FormData) {
   const login = text(formData, "login")
   const role = text(formData, "role")
   const organisationId = text(formData, "organisation_id")
+  const address = text(formData, "address")
 
   if (!username || !login || !organisationId) {
     return { error: "Username, login, and organisation are required." }
@@ -264,24 +283,152 @@ function readUser(formData: FormData) {
   if (role !== "seller" && role !== "investor") {
     return { error: "Role must be seller or investor." }
   }
-  return { input: { username, login, role, organisationId } }
+  if (address.length > 200) {
+    return { error: "XRPL address is too long." }
+  }
+  return { input: { username, login, role, organisationId, address } }
 }
 
-async function ensureInvestorMultisig(supabase: ServiceClient, organisationId: string) {
-  const { data: existing, error: existingError } = await supabase
-    .from("multisigs")
-    .select("id")
-    .eq("organisation_id", organisationId)
-    .eq("type", "investor")
-    .maybeSingle()
-  if (existingError) return existingError.message
-  if (existing) return null
-  const { error: multisigError } = await supabase.from("multisigs").insert({
-    organisation_id: organisationId,
-    type: "investor",
-    status: "not_created",
-  })
-  return multisigError ? multisigError.message : null
+export async function prepareMultisig(
+  formData: FormData,
+): Promise<ActionState & { multisigId?: string; payment?: FundingPayment; botPayment?: FundingPayment }> {
+  const kind = text(formData, "multisig_type") || "organisation"
+  const prepared =
+    kind === "organisation"
+      ? await prepareOrgMultisig(
+          createServiceClient(),
+          text(formData, "organisation_id"),
+          formData
+            .getAll("identity_id")
+            .filter((value): value is string => typeof value === "string" && value.length > 0),
+        )
+      : await prepareCentralMultisig(createServiceClient(), kind, text(formData, "signer_address"))
+  if (prepared.error || !prepared.multisigId || !prepared.payment) {
+    return { error: prepared.error ?? "The multisig could not be prepared." }
+  }
+  if (kind !== "governance" && !prepared.botPayment) {
+    return { error: prepared.error ?? "The multisig could not be prepared." }
+  }
+  revalidatePath("/sandbox")
+  return { multisigId: prepared.multisigId, payment: prepared.payment, botPayment: prepared.botPayment }
+}
+
+export async function finishMultisig(multisigId: string): Promise<ActionState & { needsFunding?: FundingPayment }> {
+  const finished = await finishOrgMultisig(createServiceClient(), multisigId)
+  if (finished.needsFunding) return { needsFunding: finished.needsFunding }
+  if (finished.error) return { error: finished.error }
+  revalidatePath("/sandbox")
+  return { message: finished.message }
+}
+
+function listed(formData: FormData, name: string) {
+  return [
+    ...new Set(
+      formData
+        .getAll(name)
+        .filter((value): value is string => typeof value === "string")
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ),
+  ]
+}
+
+function wholeNumber(value: string) {
+  if (!/^\d+$/.test(value)) return null
+  const parsed = Number(value)
+  return parsed >= 1 ? parsed : null
+}
+
+function readSignerChange(formData: FormData): { error: string } | { input: SignerChange } {
+  const multisigId = text(formData, "multisig_id")
+  const quorum = wholeNumber(text(formData, "quorum"))
+  if (!quorum) return { error: "Quorum must be at least 1." }
+  const addresses = listed(formData, "signer_address")
+  const extra = text(formData, "extra_address")
+  if (extra) addresses.push(extra)
+  const unique = [...new Set(addresses)]
+  if (unique.some((address) => !isValidClassicAddress(address))) {
+    return { error: "Every signer needs a classic XRPL address." }
+  }
+  const signers = []
+  for (const address of unique) {
+    const raw = text(formData, `weight_${address}`) || (address === extra ? text(formData, "extra_weight") : "") || "1"
+    const weight = wholeNumber(raw)
+    if (!weight) return { error: "Each signer weight must be at least 1." }
+    signers.push({ address, weight })
+  }
+  return {
+    input: {
+      multisigId,
+      quorum,
+      signers,
+      walletAddress: text(formData, "wallet_address"),
+    },
+  }
+}
+
+function readDepositChange(formData: FormData): { error: string } | { input: DepositChange } {
+  const allowAnyone = formData.get("allow_anyone") === "yes"
+  const addresses = listed(formData, "sender_address")
+  const extra = text(formData, "extra_sender")
+  if (extra) addresses.push(extra)
+  const unique = [...new Set(addresses)].filter((address) => address !== anyoneCanSend)
+  if (!allowAnyone && unique.some((address) => !isValidClassicAddress(address))) {
+    return { error: "Every sender needs a classic XRPL address." }
+  }
+  return {
+    input: {
+      multisigId: text(formData, "multisig_id"),
+      allowAnyone,
+      addresses: allowAnyone ? [] : unique,
+      walletAddress: text(formData, "wallet_address"),
+    },
+  }
+}
+
+type ChangeResult = ActionState & { transactions?: LedgerChange["transactions"] }
+
+function changed(result: LedgerChange): ChangeResult {
+  if (result.error) return { error: result.error }
+  if (result.transactions) return { transactions: result.transactions }
+  revalidatePath("/sandbox")
+  return { message: result.message }
+}
+
+export async function updateMultisigSigners(formData: FormData): Promise<ChangeResult> {
+  const read = readSignerChange(formData)
+  if (!("input" in read)) return read
+  return changed(await changeMultisigSigners(createServiceClient(), read.input))
+}
+
+export async function submitMultisigSigners(formData: FormData, blobs: string[]): Promise<ChangeResult> {
+  const read = readSignerChange(formData)
+  if (!("input" in read)) return read
+  return changed(await changeMultisigSigners(createServiceClient(), read.input, blobs))
+}
+
+export async function updateMultisigDeposits(formData: FormData): Promise<ChangeResult> {
+  const read = readDepositChange(formData)
+  if (!("input" in read)) return read
+  return changed(await changeMultisigDeposits(createServiceClient(), read.input))
+}
+
+export async function submitMultisigDeposits(formData: FormData, blobs: string[]): Promise<ChangeResult> {
+  const read = readDepositChange(formData)
+  if (!("input" in read)) return read
+  return changed(await changeMultisigDeposits(createServiceClient(), read.input, blobs))
+}
+
+export async function trustMultisig(multisigId: string, walletAddress: string): Promise<ChangeResult> {
+  return changed(await trustMultisigRlusd(createServiceClient(), multisigId, walletAddress))
+}
+
+export async function submitMultisigTrust(multisigId: string, walletAddress: string, blobs: string[]): Promise<ChangeResult> {
+  return changed(await trustMultisigRlusd(createServiceClient(), multisigId, walletAddress, blobs))
+}
+
+export async function trustBot(botId: string): Promise<ChangeResult> {
+  return changed(await trustBotRlusd(createServiceClient(), botId))
 }
 
 export async function createUser(
@@ -290,12 +437,12 @@ export async function createUser(
 ): Promise<ActionState> {
   const read = readUser(formData)
   if ("error" in read) return read
-  const { username, login, role, organisationId } = read.input
+  const { username, login, role, organisationId, address } = read.input
 
   const supabase = createServiceClient()
   const { data: identity, error: identityError } = await supabase
     .from("identities")
-    .insert({ username, login })
+    .insert({ username, login, xrpl_address: address || null })
     .select("id")
     .single()
   if (identityError) return { error: identityError.message }
@@ -312,11 +459,6 @@ export async function createUser(
     .insert({ member_id: member.id, role })
   if (roleError) return { error: roleError.message }
 
-  if (role === "investor") {
-    const multisigError = await ensureInvestorMultisig(supabase, organisationId)
-    if (multisigError) return { error: multisigError }
-  }
-
   revalidatePath("/sandbox")
   return { message: `Linked ${username} as ${role}.` }
 }
@@ -329,12 +471,12 @@ export async function updateUser(
   if (!id) return { error: "Choose a user to edit." }
   const read = readUser(formData)
   if ("error" in read) return read
-  const { username, login, role, organisationId } = read.input
+  const { username, login, role, organisationId, address } = read.input
 
   const supabase = createServiceClient()
   const { error: identityError } = await supabase
     .from("identities")
-    .update({ username, login })
+    .update({ username, login, xrpl_address: address || null })
     .eq("id", id)
   if (identityError) return { error: identityError.message }
 
@@ -362,11 +504,6 @@ export async function updateUser(
     .from("membership_roles")
     .insert({ member_id: member.id, role })
   if (roleError) return { error: roleError.message }
-
-  if (role === "investor") {
-    const multisigError = await ensureInvestorMultisig(supabase, organisationId)
-    if (multisigError) return { error: multisigError }
-  }
 
   revalidatePath("/sandbox")
   return { message: `Saved ${username}.` }
@@ -860,54 +997,6 @@ export async function updateBucket(
   return { message: `Saved bucket ${read.input.name}.` }
 }
 
-type FundsSnapshot = {
-  available_rlusd: number
-  reserved_rlusd: number
-  outstanding_rlusd: number
-  portfolio_rlusd: number
-}
-
-function snapshotFrom(row: {
-  available_rlusd: unknown
-  reserved_rlusd: unknown
-  outstanding_rlusd: unknown
-  portfolio_rlusd: unknown
-}): FundsSnapshot {
-  return {
-    available_rlusd: Number(row.available_rlusd),
-    reserved_rlusd: Number(row.reserved_rlusd),
-    outstanding_rlusd: Number(row.outstanding_rlusd),
-    portfolio_rlusd: Number(row.portfolio_rlusd),
-  }
-}
-
-function emptyFunds(): FundsSnapshot {
-  return { available_rlusd: 0, reserved_rlusd: 0, outstanding_rlusd: 0, portfolio_rlusd: 0 }
-}
-
-async function latestFunds(supabase: ServiceClient, organisationId: string) {
-  const { data, error } = await supabase
-    .from("organisation_portfolio_snapshots")
-    .select("available_rlusd, reserved_rlusd, outstanding_rlusd, portfolio_rlusd")
-    .eq("organisation_id", organisationId)
-    .order("captured_at", { ascending: false })
-    .limit(1)
-    .maybeSingle()
-  if (error) return { error: error.message }
-  return { snapshot: data ? snapshotFrom(data) : null }
-}
-
-async function insertFunds(supabase: ServiceClient, organisationId: string, funds: FundsSnapshot) {
-  const { error } = await supabase.from("organisation_portfolio_snapshots").insert({
-    organisation_id: organisationId,
-    available_rlusd: roundMoney(funds.available_rlusd),
-    reserved_rlusd: roundMoney(funds.reserved_rlusd),
-    outstanding_rlusd: roundMoney(funds.outstanding_rlusd),
-    portfolio_rlusd: roundMoney(Math.max(0, funds.portfolio_rlusd)),
-  })
-  return error ? error.message : null
-}
-
 export async function updateMatching(
   _state: ActionState,
   _formData: FormData,
@@ -984,53 +1073,16 @@ export async function acceptInvoice(
   }
 
   const investorId = outcome.winnerOrganisationId
-  const sellerId = invoice.seller_organisation_id as string
-  const investorFunds = await latestFunds(supabase, investorId)
-  if ("error" in investorFunds) return investorFunds
-  const investor = investorFunds.snapshot
-  if (!investor || roundMoney(investor.available_rlusd - offerRlusd) < 0) {
-    return { error: "The investor does not have enough available RLUSD." }
-  }
-  const sellerFunds = await latestFunds(supabase, sellerId)
-  if ("error" in sellerFunds) return sellerFunds
-  const seller = sellerFunds.snapshot ?? emptyFunds()
-
-  const investorWrite = await insertFunds(supabase, investorId, {
-    ...investor,
-    available_rlusd: investor.available_rlusd - offerRlusd,
+  const { error: saleError } = await supabase.rpc("accept_invoice_sale", {
+    p_invoice_id: invoiceId,
+    p_buyer_organisation_id: investorId,
+    p_buyer_bucket_id: outcome.winnerBucketId,
+    p_sold_price: roundMoney(outcome.offer),
+    p_sold_date: priced.today,
+    p_offer_rlusd: offerRlusd,
+    p_face_rlusd: faceRlusd,
   })
-  if (investorWrite) return { error: investorWrite }
-  const sellerWrite = await insertFunds(supabase, sellerId, {
-    ...seller,
-    available_rlusd: seller.available_rlusd + offerRlusd,
-    portfolio_rlusd: seller.portfolio_rlusd + offerRlusd,
-  })
-  if (sellerWrite) return { error: sellerWrite }
-
-  const { error: saleError } = await supabase
-    .from("organisation_invoices")
-    .update({
-      buyer_organisation_id: investorId,
-      buyer_bucket_id: outcome.winnerBucketId,
-      sold_price: roundMoney(outcome.offer),
-      sold_date: priced.today,
-    })
-    .eq("id", invoiceId)
   if (saleError) return { error: saleError.message }
-
-  const { data: bucket, error: bucketError } = await supabase
-    .from("organisation_buckets")
-    .select("exposure_used_usd")
-    .eq("id", outcome.winnerBucketId)
-    .maybeSingle()
-  if (bucketError) return { error: bucketError.message }
-  if (bucket) {
-    const { error: exposureError } = await supabase
-      .from("organisation_buckets")
-      .update({ exposure_used_usd: roundMoney(Number(bucket.exposure_used_usd) + faceRlusd) })
-      .eq("id", outcome.winnerBucketId)
-    if (exposureError) return { error: exposureError.message }
-  }
 
   revalidatePath("/sandbox")
   revalidatePath("/match")
@@ -1044,95 +1096,12 @@ export async function repayInvoice(
   const invoiceId = text(formData, "invoice_id")
   if (!invoiceId) return { error: "Choose an invoice." }
 
-  let rate: number
-  try {
-    rate = await frankfurterRate()
-  } catch (error) {
-    return { error: error instanceof Error ? error.message : "Frankfurter did not return a rate." }
+  const result = await repaySoldInvoice(createServiceClient(), invoiceId)
+  if (!result.error) {
+    revalidatePath("/sandbox")
+    revalidatePath("/match")
+    revalidatePath("/investor")
+    revalidatePath("/seller")
   }
-
-  const supabase = createServiceClient()
-  const { data: invoice, error: invoiceError } = await supabase
-    .from("organisation_invoices")
-    .select(
-      "id, obligor_organisation_id, buyer_organisation_id, buyer_bucket_id, face_value, currency, sold_price, repayment_amount, repaid",
-    )
-    .eq("id", invoiceId)
-    .maybeSingle()
-  if (invoiceError) return { error: invoiceError.message }
-  if (!invoice) return { error: "That invoice is not in the catalogue." }
-  if (!invoice.buyer_organisation_id) return { error: "This invoice has not been sold." }
-  if (invoice.repaid) return { error: "This invoice is already repaid." }
-
-  const obligorId = invoice.obligor_organisation_id as string
-  const investorId = invoice.buyer_organisation_id as string
-  const obligorFunds = await latestFunds(supabase, obligorId)
-  if ("error" in obligorFunds) return obligorFunds
-  const obligor = obligorFunds.snapshot
-  if (!obligor || obligor.available_rlusd <= 0) {
-    return { error: "The obligor has no available RLUSD." }
-  }
-  const investorFunds = await latestFunds(supabase, investorId)
-  if ("error" in investorFunds) return investorFunds
-  const investor = investorFunds.snapshot ?? emptyFunds()
-
-  const payment = repaymentOf({
-    face: Number(invoice.face_value),
-    repaidSoFar: Number(invoice.repayment_amount),
-    soldPrice: Number(invoice.sold_price ?? 0),
-    availableRlusd: obligor.available_rlusd,
-    currency: invoice.currency as string,
-    rate,
-  })
-  if ("error" in payment) return payment
-
-  const obligorWrite = await insertFunds(supabase, obligorId, {
-    ...obligor,
-    available_rlusd: obligor.available_rlusd - payment.paymentRlusd,
-    portfolio_rlusd: obligor.portfolio_rlusd - payment.paymentRlusd,
-  })
-  if (obligorWrite) return { error: obligorWrite }
-  const investorWrite = await insertFunds(supabase, investorId, {
-    ...investor,
-    available_rlusd: investor.available_rlusd + payment.paymentRlusd,
-    portfolio_rlusd: investor.portfolio_rlusd + payment.profitRlusd,
-  })
-  if (investorWrite) return { error: investorWrite }
-
-  const today = new Date().toISOString().slice(0, 10)
-  const { error: repayError } = await supabase
-    .from("organisation_invoices")
-    .update({
-      repayment_amount: payment.nextRepayment,
-      repaid: payment.fullyRepaid,
-      repaid_date: payment.fullyRepaid ? today : null,
-    })
-    .eq("id", invoiceId)
-  if (repayError) return { error: repayError.message }
-
-  if (payment.fullyRepaid && invoice.buyer_bucket_id) {
-    const faceRlusd = toRlusd(Number(invoice.face_value), invoice.currency as string, rate)
-    const { data: bucket, error: bucketError } = await supabase
-      .from("organisation_buckets")
-      .select("exposure_used_usd")
-      .eq("id", invoice.buyer_bucket_id)
-      .maybeSingle()
-    if (bucketError) return { error: bucketError.message }
-    if (bucket && faceRlusd !== null) {
-      const { error: exposureError } = await supabase
-        .from("organisation_buckets")
-        .update({
-          exposure_used_usd: roundMoney(Math.max(0, Number(bucket.exposure_used_usd) - faceRlusd)),
-        })
-        .eq("id", invoice.buyer_bucket_id)
-      if (exposureError) return { error: exposureError.message }
-    }
-  }
-
-  revalidatePath("/sandbox")
-  revalidatePath("/match")
-  const paid = `${payment.paymentRlusd} RLUSD`
-  return {
-    message: payment.fullyRepaid ? `Repaid the invoice with ${paid}.` : `Repaid ${paid} toward the invoice.`,
-  }
+  return result
 }

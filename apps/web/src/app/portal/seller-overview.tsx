@@ -1,7 +1,9 @@
 import { loadCatalogue } from "@/app/match/load"
 import { runMatch } from "@/app/match/match"
 import { frankfurterRate, loadUsdRate } from "@/app/match/rate"
+import { readDisplayedFunds } from "@/portfolio/capture"
 import { createServiceClient } from "@/lib/supabase/service"
+import { MoneyGroup } from "./money-value"
 import { AddInvoiceButton } from "./seller-controls"
 import { SellerInvoices, type SellerInvoiceRow } from "./seller-invoices"
 import { SELLER_PAGE_SIZE, parseSellerQuery, type SellerQuery } from "./seller-query"
@@ -19,6 +21,23 @@ function optionalNum(value: unknown) {
 
 function dateOnly(value: unknown) {
   return String(value ?? "").slice(0, 10)
+}
+
+async function sellerRlusd(supabase: ReturnType<typeof createServiceClient>, organisationId: string) {
+  try {
+    const wallet = await readDisplayedFunds(supabase, organisationId)
+    return wallet ? wallet.available : null
+  } catch {
+    const snapshot = await supabase
+      .from("organisation_portfolio_snapshots")
+      .select("available_rlusd")
+      .eq("organisation_id", organisationId)
+      .order("captured_at", { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    if (snapshot.error) throw new Error(snapshot.error.message)
+    return snapshot.data ? num(snapshot.data.available_rlusd) : 0
+  }
 }
 
 async function pricedOffers(invoiceIds: Set<string>) {
@@ -64,7 +83,7 @@ export async function SellerOverview({
 }) {
   const parsed = parseSellerQuery(query)
   const supabase = createServiceClient()
-  const [organisation, invoicesResult, organisationsResult, usdRate] = await Promise.all([
+  const [organisation, invoicesResult, organisationsResult, usdRate, rlusd] = await Promise.all([
     supabase.from("organisations").select("legal_name, company_id, country").eq("id", organisationId).maybeSingle(),
     supabase
       .from("organisation_invoices")
@@ -74,6 +93,7 @@ export async function SellerOverview({
       .eq("seller_organisation_id", organisationId),
     supabase.from("organisations").select("id, legal_name").order("legal_name"),
     loadUsdRate(),
+    sellerRlusd(supabase, organisationId),
   ])
   if (organisation.error) throw new Error(organisation.error.message)
   if (invoicesResult.error) throw new Error(invoicesResult.error.message)
@@ -151,6 +171,12 @@ export async function SellerOverview({
           }))}
         />
       </div>
+      <section className="mt-6 max-w-sm rounded-lg border border-border bg-white p-5">
+        <p className="text-xs font-medium tracking-wide text-neutral-500 uppercase">Available RLUSD</p>
+        <div className="mt-2 text-3xl font-semibold tracking-tight tabular-nums">
+          {rlusd === null ? "—" : <MoneyGroup rows={[{ amount: rlusd, currency: "RLUSD" }]} rate={usdRate} />}
+        </div>
+      </section>
       {offers.detail ? <p className="mt-6 text-sm text-red-700">{offers.detail}</p> : null}
       <SellerInvoices
         invoices={visible}

@@ -10,6 +10,8 @@
     "build": "npm run build -w @antecipa/web",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "npm run lint -w @antecipa/web",
-    "start": "npm run start -w @antecipa/web"
+    "start": "npm run start -w @antecipa/web",
+    "sell": "npm run sell -w @antecipa/web",
+    "snapshot": "npm run snapshot -w @antecipa/web"
   }
 }

@@ -133,6 +133,7 @@ export function UserForm({
 }) {
   const [state, action, pending] = useActionState(initial ? updateUser : createUser, null)
   const { draft, remember } = useFormDraft(initial ? `user:${initial.id}` : "user:new", state, onSaved)
+
   return (
     <form action={action} className="grid gap-3" {...draftForm(remember)}>
       {initial ? <input type="hidden" name="id" value={initial.id} /> : null}
@@ -169,6 +170,18 @@ export function UserForm({
           ))}
         </select>
       </label>
+      <label className={label}>
+        XRPL address
+        <input
+          name="address"
+          spellCheck={false}
+          autoComplete="off"
+          placeholder="r..."
+          defaultValue={textDraft(draft, "address", initial?.address)}
+          className={field}
+        />
+      </label>
+      <p className="text-xs text-muted">Leave blank to clear it.</p>
       <Feedback state={state} />
       <button type="submit" disabled={pending} className={button}>
         {pending ? "Saving" : initial ? "Save user" : "Link user"}
@@ -181,7 +194,7 @@ export function FundsForm({
   initial,
   onSaved,
 }: {
-  initial: Pick<OrganisationRecord, "id" | "legal_name" | "available_rlusd" | "portfolio_rlusd">
+  initial: Pick<OrganisationRecord, "id" | "legal_name" | "stored_available_rlusd" | "portfolio_rlusd">
   onSaved?: () => void
 }) {
   const [state, action, pending] = useActionState(setFunds, null)
@@ -201,7 +214,7 @@ export function FundsForm({
           min="0"
           step="0.01"
           required
-          defaultValue={textDraft(draft, "available_rlusd", initial.available_rlusd)}
+          defaultValue={textDraft(draft, "available_rlusd", initial.stored_available_rlusd)}
           className={field}
         />
       </label>
