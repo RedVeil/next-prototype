@@ -23,11 +23,6 @@
     "xrpl": "^4.7.0",
     "xrpl-connect": "^1.0.0"
   },
-  "pnpm": {
-    "patchedDependencies": {
-      "xrpl-connect@1.0.0": "patches/xrpl-connect.patch"
-    }
-  },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
