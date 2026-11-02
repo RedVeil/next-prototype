@@ -4,6 +4,7 @@ import { roundMoney } from "@/app/sandbox/settle"
 import { withClient } from "@/app/sandbox/ledger"
 import { anyoneCanSend } from "@/app/sandbox/types"
 import { isRlusdCurrency, RLUSD_CURRENCY, RLUSD_ISSUER, rlusdValue } from "@/ledger/rlusd"
+import { withSourceTag } from "@/ledger/source-tag"
 import { createServiceClient } from "@/lib/supabase/service"
 import { captureOrganisationNow } from "./capture"
 
@@ -371,7 +372,7 @@ export async function prepareInvestorTransfer(kind: string, amountInput: number)
         ledger_index: "validated",
       })
       return client.autofill(
-        {
+        withSourceTag({
           TransactionType: "Payment",
           Account: context.multisig,
           Destination: context.wallet,
@@ -379,7 +380,7 @@ export async function prepareInvestorTransfer(kind: string, amountInput: number)
           Sequence: info.result.account_data.Sequence,
           SigningPubKey: "",
           Signers: [{ Signer: { Account: context.wallet, SigningPubKey: "", TxnSignature: "" } }],
-        },
+        }),
         1,
       )
     })

@@ -1,5 +1,6 @@
 import { sign } from "ripple-keypairs"
 import { isRlusdCurrency, RLUSD_CURRENCY, RLUSD_ISSUER, rlusdValue } from "../ledger/rlusd"
+import { xrplSourceTag } from "../ledger/source-tag"
 import {
   BatchFlags,
   Client,
@@ -68,6 +69,7 @@ function inner(tx: InnerTransaction, sequence: number): InnerTransaction {
     Flags: (Number(tx.Flags ?? 0) | INNER) >>> 0,
     Sequence: sequence,
     SigningPubKey: "",
+    SourceTag: xrplSourceTag(),
   }
 }
 
@@ -234,6 +236,7 @@ export async function prepareSale(input: {
     Fee: String(feeDrops),
     LastLedgerSequence: Number(ledger.result.ledger_index) + 20,
     RawTransactions: raw,
+    SourceTag: xrplSourceTag(),
   } as Batch
 
   return {
@@ -338,6 +341,7 @@ export async function prepareRepayment(input: {
     Fee: String(feeDrops),
     LastLedgerSequence: Number(ledger.result.ledger_index) + 20,
     RawTransactions: raw,
+    SourceTag: xrplSourceTag(),
   } as Batch
 
   return {

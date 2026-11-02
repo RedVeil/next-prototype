@@ -11,6 +11,7 @@ import {
   type TxResponse,
 } from "xrpl"
 import { RLUSD_CURRENCY, RLUSD_ISSUER, isRlusdCurrency } from "@/ledger/rlusd"
+import { withSourceTag } from "@/ledger/source-tag"
 import type { createServiceClient } from "@/lib/supabase/service"
 import { anyoneCanSend } from "./types"
 
@@ -218,7 +219,7 @@ async function submitTransaction(
   transaction: SubmittableTransaction,
   allowed = new Set<string>(),
 ) {
-  const prepared = await client.autofill(transaction)
+  const prepared = await client.autofill(withSourceTag(transaction))
   const signed = wallet.sign(prepared)
   try {
     const response = await client.submitAndWait(signed.tx_blob)
@@ -246,12 +247,14 @@ async function botIsPreauthorized(client: Client, account: string, botAddress: s
 async function preauthorizeWithBot(client: Client, seedCiphertext: string, account: string, botAddress: string) {
   if (await botIsPreauthorized(client, account, botAddress)) return
   const botWallet = Wallet.fromSeed(decryptSeed(seedCiphertext))
-  const prepared = await client.autofill({
-    TransactionType: "DepositPreauth",
-    Account: account,
-    Authorize: botAddress,
-    SigningPubKey: "",
-  })
+  const prepared = await client.autofill(
+    withSourceTag({
+      TransactionType: "DepositPreauth",
+      Account: account,
+      Authorize: botAddress,
+      SigningPubKey: "",
+    }),
+  )
   const signed = botWallet.sign(prepared, true)
   const response = await client.submitAndWait(signed.tx_blob)
   const code = transactionResult(response)
@@ -733,7 +736,7 @@ function signerListTransaction(account: string, quorum: number, signers: SignerE
 
 async function submitWithBot(client: Client, seedCiphertext: string, transaction: PlannedTransaction) {
   const botWallet = Wallet.fromSeed(decryptSeed(seedCiphertext))
-  const prepared = await client.autofill({ ...transaction, SigningPubKey: "" }, 1)
+  const prepared = await client.autofill(withSourceTag({ ...transaction, SigningPubKey: "" }), 1)
   const signed = botWallet.sign(prepared, true)
   await submitBlob(client, signed.tx_blob)
 }
@@ -758,12 +761,12 @@ async function prepareForWallet(client: Client, account: string, walletAddress: 
   for (const transaction of transactions) {
     prepared.push(
       await client.autofill(
-        {
+        withSourceTag({
           ...transaction,
           Sequence: sequence,
           SigningPubKey: "",
           Signers: [{ Signer: { Account: walletAddress, SigningPubKey: "", TxnSignature: "" } }],
-        } as PlannedTransaction,
+        }) as PlannedTransaction,
         1,
       ),
     )

@@ -6,6 +6,7 @@ import { useEffect, useState, type FormEvent } from "react"
 import { isWalletError, WalletErrorCode } from "xrpl-connect"
 import { isValidClassicAddress, xrpToDrops } from "xrpl"
 import type { SubmittableTransaction } from "xrpl"
+import { withSourceTag } from "@/ledger/source-tag"
 import {
   finishMultisig,
   prepareMultisig,
@@ -35,12 +36,14 @@ async function fundAccount(
     Amount: string
   }) => Promise<unknown>,
 ) {
-  await signAndSubmit({
-    TransactionType: "Payment",
-    Account: account,
-    Destination: payment.destination,
-    Amount: payment.amountDrops,
-  })
+  await signAndSubmit(
+    withSourceTag({
+      TransactionType: "Payment",
+      Account: account,
+      Destination: payment.destination,
+      Amount: payment.amountDrops,
+    }),
+  )
 }
 
 function messageFrom(error: unknown, fallback = "The multisig could not be created.") {

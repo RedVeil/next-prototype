@@ -8,6 +8,10 @@ const envDir = [process.cwd(), path.resolve(process.cwd(), "..")].find((dir) =>
 )
 if (envDir) loadEnvConfig(envDir)
 
-const nextConfig: NextConfig = {}
+const nextConfig: NextConfig = {
+  env: {
+    XRPL_SOURCE_TAG: process.env.XRPL_SOURCE_TAG ?? "",
+  },
+}
 
 export default nextConfig

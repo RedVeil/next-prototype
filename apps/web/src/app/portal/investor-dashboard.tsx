@@ -6,6 +6,7 @@ import { useSigner, useWallet, useWalletModal } from "@xrpl-commons/xrpl-connect
 import { isWalletError, WalletErrorCode } from "xrpl-connect"
 import { isValidClassicAddress } from "xrpl"
 import { RLUSD_CURRENCY, RLUSD_ISSUER } from "@/ledger/rlusd"
+import { withSourceTag } from "@/ledger/source-tag"
 import { BucketForm, Dialog } from "./bucket-form"
 import { deletePortalBucket, prepareFunds, recordDeposit, setPortalBucketStatus, submitWithdrawal } from "./dashboard-actions"
 import { formatApr, formatJoined, formatSignedAmount, formatWhen } from "./format"
@@ -537,12 +538,14 @@ function FundsForm({
           setError("Connect the wallet saved on this user.")
           return
         }
-        const signed = await signAndSubmit({
-          TransactionType: "Payment",
-          Account: prepared.account,
-          Destination: prepared.destination,
-          Amount: { currency: RLUSD_CURRENCY, issuer: RLUSD_ISSUER, value: prepared.value },
-        })
+        const signed = await signAndSubmit(
+          withSourceTag({
+            TransactionType: "Payment",
+            Account: prepared.account,
+            Destination: prepared.destination,
+            Amount: { currency: RLUSD_CURRENCY, issuer: RLUSD_ISSUER, value: prepared.value },
+          }),
+        )
         await finishRecord(await recordDeposit(signed.hash), { hash: signed.hash })
         return
       }
