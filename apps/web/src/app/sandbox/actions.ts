@@ -21,7 +21,6 @@ import {
 } from "./ledger"
 import { isValidClassicAddress } from "xrpl"
 import { repaySoldInvoice } from "@/sale/repay"
-import { roundMoney, toRlusd } from "./settle"
 import { anyoneCanSend } from "./types"
 
 export type { FundingPayment }
@@ -1010,83 +1009,21 @@ export async function updateMatching(
       rate,
       invoices: catalogue.invoices,
       buckets: catalogue.buckets,
-      random: () => 0,
     })
-    const priced = outcomes.filter((item) => item.offer !== null).length
+    const priced = outcomes.filter((item) => item.eligible.length > 0).length
     revalidatePath("/sandbox")
     revalidatePath("/match")
-    return { message: `Priced ${priced} offers.` }
+    return { message: `Listed eligible buckets for ${priced} invoices.` }
   } catch (error) {
     return { error: error instanceof Error ? error.message : "Matching did not run." }
   }
 }
 
-async function stableOffer(invoiceId: string) {
-  const rate = await frankfurterRate()
-  const catalogue = await loadCatalogue()
-  const today = new Date().toISOString().slice(0, 10)
-  const outcome = runMatch({
-    today,
-    rate,
-    invoices: catalogue.invoices,
-    buckets: catalogue.buckets,
-    random: () => 0,
-  }).find((item) => item.invoiceId === invoiceId)
-  return { rate, today, outcome }
-}
-
 export async function acceptInvoice(
   _state: ActionState,
-  formData: FormData,
+  _formData: FormData,
 ): Promise<ActionState> {
-  const invoiceId = text(formData, "invoice_id")
-  if (!invoiceId) return { error: "Choose an invoice." }
-
-  let priced: Awaited<ReturnType<typeof stableOffer>>
-  try {
-    priced = await stableOffer(invoiceId)
-  } catch (error) {
-    return { error: error instanceof Error ? error.message : "The offer could not be priced." }
-  }
-  const outcome = priced.outcome
-  if (!outcome) return { error: "That invoice is not in the catalogue." }
-  if (outcome.skipped) return { error: outcome.skipped }
-  if (outcome.offer === null || !outcome.winnerOrganisationId || !outcome.winnerBucketId) {
-    return { error: "No bucket matched this invoice." }
-  }
-
-  const supabase = createServiceClient()
-  const { data: invoice, error: invoiceError } = await supabase
-    .from("organisation_invoices")
-    .select("id, seller_organisation_id, buyer_organisation_id, face_value, currency, repaid")
-    .eq("id", invoiceId)
-    .maybeSingle()
-  if (invoiceError) return { error: invoiceError.message }
-  if (!invoice) return { error: "That invoice is not in the catalogue." }
-  if (invoice.buyer_organisation_id) return { error: "This invoice is already sold." }
-  if (invoice.repaid) return { error: "This invoice is already repaid." }
-
-  const offerRlusd = toRlusd(outcome.offer, invoice.currency as string, priced.rate)
-  const faceRlusd = toRlusd(Number(invoice.face_value), invoice.currency as string, priced.rate)
-  if (offerRlusd === null || faceRlusd === null) {
-    return { error: `${invoice.currency} is not converted. Only BRL, USD, and RLUSD are.` }
-  }
-
-  const investorId = outcome.winnerOrganisationId
-  const { error: saleError } = await supabase.rpc("accept_invoice_sale", {
-    p_invoice_id: invoiceId,
-    p_buyer_organisation_id: investorId,
-    p_buyer_bucket_id: outcome.winnerBucketId,
-    p_sold_price: roundMoney(outcome.offer),
-    p_sold_date: priced.today,
-    p_offer_rlusd: offerRlusd,
-    p_face_rlusd: faceRlusd,
-  })
-  if (saleError) return { error: saleError.message }
-
-  revalidatePath("/sandbox")
-  revalidatePath("/match")
-  return { message: `Sold for ${roundMoney(outcome.offer)} ${invoice.currency}.` }
+  return { error: "Request quotes from the seller invoice list. Accepting a match does not sell the invoice." }
 }
 
 export async function repayInvoice(

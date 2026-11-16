@@ -172,9 +172,16 @@ async function committedRlusd(supabase: ServiceClient, organisationId: string) {
     .from("sale_orders")
     .select("offer_rlusd")
     .eq("buyer_organisation_id", organisationId)
-    .in("status", ["queued", "preparing", "submitted"])
+    .in("status", ["queued", "preparing", "submitted", "accepting", "unknown"])
   if (error) throw new Error(error.message)
-  return (data ?? []).reduce((sum, row) => sum + Number(row.offer_rlusd), 0)
+  const offers = await supabase
+    .from("invoice_offers")
+    .select("rlusd_amount")
+    .eq("investor_organisation_id", organisationId)
+    .eq("status", "signed")
+  if (offers.error && !offers.error.message.includes("invoice_offers")) throw new Error(offers.error.message)
+  const offered = (offers.data ?? []).reduce((sum, row) => sum + Number(row.rlusd_amount), 0)
+  return (data ?? []).reduce((sum, row) => sum + Number(row.offer_rlusd), 0) + offered
 }
 
 async function signerAllowed(supabase: ServiceClient, multisigId: string, wallet: string, quorum: number) {

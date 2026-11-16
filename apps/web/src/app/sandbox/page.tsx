@@ -7,7 +7,6 @@ import { DemoBrowser, RiskToolbar } from "./browser"
 import { rlusdBalances, rlusdTrustLines } from "@/portfolio/balances"
 import { reservedXrp, xrpBalances } from "./ledger"
 import { WalletProviders } from "./wallet-provider"
-import { toRlusd } from "./settle"
 import type {
   BotRecord,
   BucketRecord,
@@ -42,7 +41,7 @@ function dateOnly(value: unknown) {
   return String(value ?? "").slice(0, 10)
 }
 
-async function loadInvoiceOffers(names: Map<string, string>) {
+async function loadInvoiceOffers() {
   try {
     const rate = await frankfurterRate()
     const catalogue = await loadCatalogue()
@@ -52,23 +51,18 @@ async function loadInvoiceOffers(names: Map<string, string>) {
       rate,
       invoices: catalogue.invoices,
       buckets: catalogue.buckets,
-      random: () => 0,
     })
     const byId = new Map<
       string,
       { offer: number | null; offer_rlusd: number | null; offer_investor: string; offer_detail: string | null }
     >()
     for (const outcome of outcomes) {
-      const offer = outcome.offer
-      const offerRlusd = offer === null ? null : toRlusd(offer, outcome.currency, rate)
-      const investor = outcome.winnerOrganisationId
-        ? (names.get(outcome.winnerOrganisationId) ?? "")
-        : ""
+      const count = outcome.eligible.length
       byId.set(outcome.invoiceId, {
-        offer,
-        offer_rlusd: offerRlusd,
-        offer_investor: investor,
-        offer_detail: outcome.skipped ?? (offer === null ? "No bucket matched." : null),
+        offer: null,
+        offer_rlusd: null,
+        offer_investor: "",
+        offer_detail: outcome.skipped ?? (count === 0 ? "No eligible bucket." : `${count} eligible buckets.`),
       })
     }
     return { detail: null as string | null, byId }
@@ -354,7 +348,7 @@ async function loadSandbox(): Promise<DemoData> {
     featuresByBucket.set(row.bucketId, list)
   }
 
-  const offers = await loadInvoiceOffers(organisationName)
+  const offers = await loadInvoiceOffers()
   const createdByOrg = new Map<string, string[]>()
   const boughtByOrg = new Map<string, string[]>()
   const createdActivity = new Map<string, { count: number; face_value: number }>()

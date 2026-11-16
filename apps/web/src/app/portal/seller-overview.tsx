@@ -1,10 +1,9 @@
-import { loadCatalogue } from "@/app/match/load"
-import { runMatch } from "@/app/match/match"
-import { frankfurterRate, loadUsdRate } from "@/app/match/rate"
+import { loadUsdRate } from "@/app/match/rate"
+import { sellerRounds } from "@/auction/domain"
 import { readDisplayedFunds } from "@/portfolio/capture"
 import { createServiceClient } from "@/lib/supabase/service"
 import { MoneyGroup } from "./money-value"
-import { AddInvoiceButton } from "./seller-controls"
+import { AddInvoiceButton, AuctionDurationForm } from "./seller-controls"
 import { SellerInvoices, type SellerInvoiceRow } from "./seller-invoices"
 import { SELLER_PAGE_SIZE, parseSellerQuery, type SellerQuery } from "./seller-query"
 
@@ -40,31 +39,6 @@ async function sellerRlusd(supabase: ReturnType<typeof createServiceClient>, org
   }
 }
 
-async function pricedOffers(invoiceIds: Set<string>) {
-  try {
-    const rate = await frankfurterRate()
-    const catalogue = await loadCatalogue()
-    const outcomes = runMatch({
-      today: new Date().toISOString().slice(0, 10),
-      rate,
-      invoices: catalogue.invoices,
-      buckets: catalogue.buckets,
-      random: () => 0,
-    })
-    const byId = new Map<string, number | null>()
-    for (const outcome of outcomes) {
-      if (!invoiceIds.has(outcome.invoiceId)) continue
-      byId.set(outcome.invoiceId, outcome.offer)
-    }
-    return { detail: null as string | null, byId }
-  } catch (error) {
-    return {
-      detail: error instanceof Error ? error.message : "The offer could not be priced.",
-      byId: new Map<string, number | null>(),
-    }
-  }
-}
-
 function sortValue(invoice: SellerInvoiceRow, field: SellerQuery["sort"]) {
   if (field === "number") return invoice.documentId
   if (field === "customer") return invoice.obligor
@@ -83,8 +57,8 @@ export async function SellerOverview({
 }) {
   const parsed = parseSellerQuery(query)
   const supabase = createServiceClient()
-  const [organisation, invoicesResult, organisationsResult, usdRate, rlusd] = await Promise.all([
-    supabase.from("organisations").select("legal_name, company_id, country").eq("id", organisationId).maybeSingle(),
+  const [organisation, invoicesResult, organisationsResult, usdRate, rlusd, rounds] = await Promise.all([
+    supabase.from("organisations").select("legal_name, company_id, country, auction_duration_hours").eq("id", organisationId).maybeSingle(),
     supabase
       .from("organisation_invoices")
       .select(
@@ -94,6 +68,7 @@ export async function SellerOverview({
     supabase.from("organisations").select("id, legal_name").order("legal_name"),
     loadUsdRate(),
     sellerRlusd(supabase, organisationId),
+    sellerRounds(organisationId),
   ])
   if (organisation.error) throw new Error(organisation.error.message)
   if (invoicesResult.error) throw new Error(invoicesResult.error.message)
@@ -103,13 +78,7 @@ export async function SellerOverview({
     (organisationsResult.data ?? []).map((row) => [row.id as string, row.legal_name as string]),
   )
   const rows = invoicesResult.data ?? []
-  const openIds = new Set(
-    rows.filter((row) => !row.buyer_organisation_id && !row.repaid).map((row) => row.id as string),
-  )
-  const offers =
-    openIds.size === 0
-      ? { detail: null, byId: new Map<string, number | null>() }
-      : await pricedOffers(openIds)
+  const activeAuction = new Set(["setup_pending", "open", "accepting", "submitted"])
 
   const invoices: SellerInvoiceRow[] = rows.map((row) => {
     const id = row.id as string
@@ -126,7 +95,8 @@ export async function SellerOverview({
       soldPrice: optionalNum(row.sold_price),
       repaid: Boolean(row.repaid),
       unsold,
-      offer: unsold && !row.repaid ? (offers.byId.get(id) ?? null) : null,
+      offer: null,
+      auctionStatus: unsold && !row.repaid ? (rounds.get(id) ?? null) : null,
     }
   })
 
@@ -137,7 +107,7 @@ export async function SellerOverview({
     }
     if (parsed.sale === "sold" && invoice.unsold) return false
     if (parsed.sale === "unsold" && !invoice.unsold) return false
-    const offerState = !invoice.unsold ? "accepted" : invoice.offer !== null ? "open" : "none"
+    const offerState = !invoice.unsold ? "accepted" : invoice.auctionStatus && activeAuction.has(invoice.auctionStatus) ? "open" : "none"
     if (parsed.offer !== "any" && offerState !== parsed.offer) return false
     return true
   })
@@ -164,6 +134,7 @@ export async function SellerOverview({
             Company id {companyId}. Country {country}.
           </p>
         </div>
+        <AuctionDurationForm hours={num(organisation.data?.auction_duration_hours) || 24} />
         <AddInvoiceButton
           organisations={(organisationsResult.data ?? []).map((row) => ({
             id: row.id as string,
@@ -177,7 +148,6 @@ export async function SellerOverview({
           {rlusd === null ? "—" : <MoneyGroup rows={[{ amount: rlusd, currency: "RLUSD" }]} rate={usdRate} />}
         </div>
       </section>
-      {offers.detail ? <p className="mt-6 text-sm text-red-700">{offers.detail}</p> : null}
       <SellerInvoices
         invoices={visible}
         total={filtered.length}

@@ -1,7 +1,6 @@
 import Link from "next/link"
 import { formatDateOnly } from "./format"
 import { MoneyGroup } from "./money-value"
-import { AcceptOfferButton } from "./seller-controls"
 import { SELLER_PAGE_SIZE, sellerHref, type SellerQuery } from "./seller-query"
 
 export type SellerInvoiceRow = {
@@ -17,6 +16,7 @@ export type SellerInvoiceRow = {
   repaid: boolean
   unsold: boolean
   offer: number | null
+  auctionStatus: string | null
 }
 
 const SORTABLE: { key: SellerQuery["sort"]; label: string }[] = [
@@ -144,9 +144,17 @@ export function SellerInvoices({
                     <td className="px-4 py-3 tabular-nums">{invoice.riskScore}</td>
                     <td className="px-4 py-3">
                       {!invoice.unsold ? (
-                        <span className="text-xs font-medium text-emerald-800">Accepted</span>
-                      ) : invoice.offer !== null && !invoice.repaid ? (
-                        <AcceptOfferButton invoiceId={invoice.id} />
+                        <span className="text-xs font-medium text-emerald-800">Sold</span>
+                      ) : !invoice.repaid ? (
+                        <Link href={`/seller/invoices/${invoice.id}`} className="text-sm font-medium text-neutral-900 underline">
+                          {invoice.auctionStatus === "open" ||
+                          invoice.auctionStatus === "accepting" ||
+                          invoice.auctionStatus === "submitted"
+                            ? "Auction"
+                            : invoice.auctionStatus === "setup_pending"
+                              ? "Sign setup"
+                              : "Request quotes"}
+                        </Link>
                       ) : null}
                     </td>
                   </tr>

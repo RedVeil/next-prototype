@@ -15,7 +15,8 @@ function navItems(role: PortalRole, pathname: string) {
         current:
           pathname === "/investor/market" ||
           pathname.startsWith("/investor/market/") ||
-          pathname.startsWith("/investor/companies"),
+          pathname.startsWith("/investor/companies") ||
+          pathname.startsWith("/investor/auctions"),
       },
     ]
   }

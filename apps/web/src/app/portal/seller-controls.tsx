@@ -3,7 +3,8 @@
 import { useActionState, useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import type { ActionState } from "@/app/sandbox/actions"
-import { acceptSellerInvoice, createSellerInvoice } from "./dashboard-actions"
+import { createSellerInvoice } from "./dashboard-actions"
+import { saveAuctionDuration } from "./auction-actions"
 
 const inputClass =
   "mt-1 w-full rounded-md border border-border bg-white px-3 py-2 text-sm text-neutral-900 outline-none focus:border-neutral-400"
@@ -128,19 +129,31 @@ function InvoiceForm({
   )
 }
 
-export function AcceptOfferButton({ invoiceId }: { invoiceId: string }) {
-  const [state, action, pending] = useActionState(acceptSellerInvoice, null)
+export function AuctionDurationForm({ hours }: { hours: number }) {
+  const [state, action, pending] = useActionState(saveAuctionDuration, null)
   const router = useRouter()
   useEffect(() => {
-    if (state?.message) router.refresh()
+    if (state && "message" in state && state.message) router.refresh()
   }, [router, state])
   return (
-    <form action={action}>
-      <input type="hidden" name="invoice_id" value={invoiceId} />
-      <button type="submit" disabled={pending} className="text-sm font-medium text-neutral-900 underline disabled:opacity-60">
-        {pending ? "Accepting" : "Accept"}
+    <form action={action} className="flex items-end gap-2">
+      <label className="text-sm text-neutral-600">
+        Auction hours
+        <input
+          name="hours"
+          type="number"
+          min={24}
+          max={48}
+          step={1}
+          required
+          defaultValue={hours}
+          className="mt-1 block h-10 w-24 rounded-md border border-border bg-white px-3 text-sm text-neutral-900"
+        />
+      </label>
+      <button type="submit" disabled={pending} className="h-10 rounded-md border border-border px-3 text-sm font-medium disabled:opacity-60">
+        {pending ? "Saving" : "Save"}
       </button>
-      {state?.error ? <p className="mt-1 text-xs text-red-700">{state.error}</p> : null}
+      {state && "error" in state && state.error ? <p className="text-xs text-red-700">{state.error}</p> : null}
     </form>
   )
 }

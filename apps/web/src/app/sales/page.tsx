@@ -43,6 +43,8 @@ function statusLabel(status: string) {
   if (status === "succeeded") return "Succeeded"
   if (status === "failed") return "Failed"
   if (status === "expired") return "Expired"
+  if (status === "accepting") return "Accepting"
+  if (status === "unknown") return "Unknown"
   return status
 }
 

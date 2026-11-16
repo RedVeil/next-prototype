@@ -47,8 +47,8 @@ export default async function MatchPage() {
         <p className="text-sm text-muted">Match</p>
         <h1 className="mt-2 text-2xl font-semibold tracking-tight">Matching</h1>
         <p className="mt-2 max-w-2xl text-sm text-muted">
-          Available invoices are unsold, unpaid, and due today or later. The lowest price wins. A
-          blank industry, country, or currency list is not a filter.
+          Available invoices are unsold, unpaid, and due today or later. Every eligible bucket is
+          listed. A blank industry, country, or currency list is not a filter.
         </p>
         <a href="/sandbox" className="mt-3 inline-block text-sm text-muted underline">
           Demo data

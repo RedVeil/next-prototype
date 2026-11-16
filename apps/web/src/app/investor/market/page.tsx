@@ -1,4 +1,5 @@
 import { redirect } from "next/navigation"
+import { InvestorInvitations } from "../../portal/investor-invitations"
 import { MarketExplorer } from "../../portal/market-explorer"
 import { loadMarket } from "../../portal/market-data"
 import { parseMarketQuery } from "../../portal/market-query"
@@ -11,5 +12,10 @@ export default async function MarketPage({ searchParams }: PageProps<"/investor/
   if (!session) redirect("/investor")
   const query = parseMarketQuery(await searchParams)
   const data = await loadMarket(query)
-  return <MarketExplorer query={query} data={data} />
+  return (
+    <div className="flex min-w-0 flex-1 flex-col">
+      {session.organisationId ? <InvestorInvitations organisationId={session.organisationId} /> : null}
+      <MarketExplorer query={query} data={data} />
+    </div>
+  )
 }

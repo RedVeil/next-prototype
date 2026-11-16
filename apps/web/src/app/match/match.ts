@@ -78,10 +78,22 @@ export type InvoiceOutcome = {
   winnerOrganisationId: string | null
   winnerBucketId: string | null
   tiedLabels: string[]
+  eligible: EligibleBucket[]
   buckets: BucketOutcome[]
 }
 
-function dayCount(today: string, due: string) {
+export type EligibleBucket = {
+  bucketId: string
+  organisationId: string
+  label: string
+  apr: number
+  price: number
+  offer: number
+  discountPercent: number
+  priceDetail: string
+}
+
+export function daysUntilDue(today: string, due: string) {
   const start = Date.parse(`${today}T00:00:00Z`)
   const end = Date.parse(`${due}T00:00:00Z`)
   if (!Number.isFinite(start) || !Number.isFinite(end)) return null
@@ -113,10 +125,6 @@ function priceDetail(face: number, currency: string, apr: number, days: number, 
   const discount = priceAmount(face, apr, days)
   const offer = face - discount
   return `${money(face)} ${currency} face × ${apyLabel(apr)} target APY × ${days} days until ${due} ÷ 365. Offer ${money(offer)} ${currency}. Discount ${money(discount)} ${currency} (${shareLabel(discountPercent(face, discount))}).`
-}
-
-function samePrice(left: number, right: number) {
-  return Math.abs(left - right) < 1e-6
 }
 
 export function earlierSaleCooldownMinutes() {
@@ -294,10 +302,45 @@ function skipReason(invoice: MatchInvoice, today: string) {
   const reasons: string[] = []
   if (invoice.buyerOrganisationId) reasons.push("Already sold.")
   if (invoice.repaid) reasons.push("Already repaid.")
-  const days = dayCount(today, invoice.dueDate)
+  const days = daysUntilDue(today, invoice.dueDate)
   if (days === null) reasons.push("Due date is missing.")
   else if (days < 0) reasons.push(`Due date ${invoice.dueDate} is before ${today}.`)
   return reasons.length > 0 ? reasons.join(" ") : null
+}
+
+export function listEligibleBuckets(input: {
+  today: string
+  rate: number
+  invoice: MatchInvoice
+  buckets: MatchBucket[]
+}): EligibleBucket[] {
+  if (skipReason(input.invoice, input.today)) return []
+  const days = daysUntilDue(input.today, input.invoice.dueDate) ?? 0
+  const blocked = new Set(input.invoice.blockedBuyerIds ?? [])
+  const eligible: EligibleBucket[] = []
+  for (const bucket of input.buckets) {
+    const checks = checksFor(bucket, input.invoice, days, bucket.exposureUsedUsd, input.rate)
+    if (blocked.has(bucket.organisationId)) {
+      checks.push({
+        name: "Earlier sale",
+        pass: false,
+        detail: `This investor's earlier sale of this invoice failed or expired in the last ${cooldownPhrase(earlierSaleCooldownMinutes())}.`,
+      })
+    }
+    if (!checks.every((check) => check.pass)) continue
+    const price = priceAmount(input.invoice.faceValue, bucket.apr, days)
+    eligible.push({
+      bucketId: bucket.id,
+      organisationId: bucket.organisationId,
+      label: `${bucket.name} · ${bucket.investor}`,
+      apr: bucket.apr,
+      price,
+      offer: input.invoice.faceValue - price,
+      discountPercent: discountPercent(input.invoice.faceValue, price),
+      priceDetail: priceDetail(input.invoice.faceValue, input.invoice.currency, bucket.apr, days, input.invoice.dueDate),
+    })
+  }
+  return eligible
 }
 
 export function runMatch(input: {
@@ -305,11 +348,8 @@ export function runMatch(input: {
   rate: number
   invoices: MatchInvoice[]
   buckets: MatchBucket[]
-  random?: () => number
 }): InvoiceOutcome[] {
-  const random = input.random ?? Math.random
   const cooldownMinutes = earlierSaleCooldownMinutes()
-  const used = new Map(input.buckets.map((bucket) => [bucket.id, bucket.exposureUsedUsd]))
   const ordered = [...input.invoices].sort((left, right) => {
     if (left.createdAt !== right.createdAt) return left.createdAt < right.createdAt ? -1 : 1
     return left.id < right.id ? -1 : left.id > right.id ? 1 : 0
@@ -317,7 +357,7 @@ export function runMatch(input: {
 
   return ordered.map((invoice) => {
     const skipped = skipReason(invoice, input.today)
-    const days = dayCount(input.today, invoice.dueDate)
+    const days = daysUntilDue(input.today, invoice.dueDate)
     const converted = invoiceUsd(invoice.faceValue, invoice.currency, input.rate)
     const shared = {
       invoiceId: invoice.id,
@@ -343,13 +383,14 @@ export function runMatch(input: {
         winnerOrganisationId: null,
         winnerBucketId: null,
         tiedLabels: [],
+        eligible: [],
         buckets: [],
       }
     }
 
     const blockedBuyers = new Set(invoice.blockedBuyerIds ?? [])
     const attempts = input.buckets.map((bucket) => {
-      const checks = checksFor(bucket, invoice, days ?? 0, used.get(bucket.id) ?? 0, input.rate)
+      const checks = checksFor(bucket, invoice, days ?? 0, bucket.exposureUsedUsd, input.rate)
       if (blockedBuyers.has(bucket.organisationId)) {
         checks.push({
           name: "Earlier sale",
@@ -376,35 +417,21 @@ export function runMatch(input: {
       }
     })
 
-    const eligible = attempts.filter((attempt) => attempt.eligible && attempt.price !== null)
-    const lowest = eligible.reduce<number | null>(
-      (min, attempt) => (min === null || attempt.price! < min ? attempt.price : min),
-      null,
-    )
-    const tied = lowest === null ? [] : eligible.filter((attempt) => samePrice(attempt.price!, lowest))
-    const winner = tied.length === 0 ? null : tied[Math.min(tied.length - 1, Math.floor(random() * tied.length))]
-    if (winner && converted) used.set(winner.bucketId, (used.get(winner.bucketId) ?? 0) + converted.amount)
-    const tiedIds = new Set(tied.map((attempt) => attempt.bucketId))
-    const winnerBucket = winner
-      ? (input.buckets.find((bucket) => bucket.id === winner.bucketId) ?? null)
-      : null
+    const eligible = listEligibleBuckets({ today: input.today, rate: input.rate, invoice, buckets: input.buckets })
 
     return {
       ...shared,
       skipped: null,
-      winnerLabel: winner?.label ?? null,
-      price: winner?.price ?? null,
-      offer: winner?.offer ?? null,
-      winnerOrganisationId: winnerBucket?.organisationId ?? null,
-      winnerBucketId: winner?.bucketId ?? null,
-      discountPercent: winner?.discountPercent ?? null,
-      priceDetail: winner?.priceDetail ?? null,
-      tiedLabels: tied.filter((attempt) => attempt.bucketId !== winner?.bucketId).map((attempt) => attempt.label),
-      buckets: attempts.map((attempt) => ({
-        ...attempt,
-        winner: attempt.bucketId === winner?.bucketId,
-        tied: tiedIds.has(attempt.bucketId),
-      })),
+      winnerLabel: null,
+      price: null,
+      offer: null,
+      winnerOrganisationId: null,
+      winnerBucketId: null,
+      discountPercent: null,
+      priceDetail: null,
+      tiedLabels: [],
+      eligible,
+      buckets: attempts,
     }
   })
 }

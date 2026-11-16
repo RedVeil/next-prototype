@@ -70,16 +70,11 @@ function Results({ state }: { state: ActionState }) {
             <p className="mt-2 text-sm text-red-700">{invoice.skipped}</p>
           ) : (
             <>
-              <p className={`mt-2 text-sm ${invoice.winnerLabel ? "text-emerald-800" : "text-red-700"}`}>
-                {invoice.winnerLabel ? `Assigned to ${invoice.winnerLabel}` : "Assigned to none"}
-                {invoice.tiedLabels.length > 0 ? ` · tied with ${invoice.tiedLabels.join(", ")}` : ""}
+              <p className={`mt-2 text-sm ${invoice.eligible.length > 0 ? "text-emerald-800" : "text-red-700"}`}>
+                {invoice.eligible.length > 0
+                  ? `Eligible: ${invoice.eligible.map((bucket) => bucket.label).join(", ")}`
+                  : "No eligible bucket."}
               </p>
-              {invoice.winnerLabel && invoice.offer !== null && invoice.price !== null && invoice.discountPercent !== null ? (
-                <p className="mt-1 text-sm text-emerald-800">
-                  {offerLine(invoice.offer, invoice.price, invoice.discountPercent, invoice.currency)}
-                </p>
-              ) : null}
-              {invoice.priceDetail ? <p className="mt-1 text-sm text-muted">{invoice.priceDetail}</p> : null}
             </>
           )}
           {invoice.buckets.length > 0 ? (
@@ -88,13 +83,13 @@ function Results({ state }: { state: ActionState }) {
                 <section
                   key={bucket.bucketId}
                   className={`rounded-xl border p-3 ${
-                    bucket.winner ? "border-emerald-600" : "border-border"
+                    bucket.eligible ? "border-emerald-600" : "border-border"
                   }`}
                 >
                   <p className="text-sm font-medium">{bucket.label}</p>
-                  {bucket.winner || bucket.price !== null ? (
-                    <p className={`mt-1 text-sm ${bucket.winner ? "text-emerald-800" : "text-muted"}`}>
-                      {bucket.winner ? "Winner" : bucket.tied ? "Tied" : "Eligible"}
+                  {bucket.eligible || bucket.price !== null ? (
+                    <p className={`mt-1 text-sm ${bucket.eligible ? "text-emerald-800" : "text-muted"}`}>
+                      {bucket.eligible ? "Eligible" : "Not eligible"}
                       {bucket.offer !== null && bucket.price !== null && bucket.discountPercent !== null
                         ? ` · ${offerLine(bucket.offer, bucket.price, bucket.discountPercent, invoice.currency)}`
                         : ""}
