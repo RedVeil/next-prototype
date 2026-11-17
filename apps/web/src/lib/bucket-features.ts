@@ -7,19 +7,27 @@ export type BucketFeatureLink = {
   mode: "yes" | "no"
 }
 
-export async function loadBucketFeatureLinks(supabase: SupabaseClient): Promise<BucketFeatureLink[]> {
-  const withMode = await supabase.from("organisation_bucket_features").select("bucket_id, feature_id, mode")
-  if (!withMode.error) {
-    return (withMode.data ?? []).map((row) => ({
+export async function loadBucketFeatureLinks(
+  supabase: SupabaseClient,
+  bucketIds?: string[],
+): Promise<BucketFeatureLink[]> {
+  if (bucketIds && bucketIds.length === 0) return []
+  let withMode = supabase.from("organisation_bucket_features").select("bucket_id, feature_id, mode")
+  if (bucketIds) withMode = withMode.in("bucket_id", bucketIds)
+  const withModeResult = await withMode
+  if (!withModeResult.error) {
+    return (withModeResult.data ?? []).map((row) => ({
       bucketId: row.bucket_id as string,
       featureId: row.feature_id as string,
       mode: row.mode === "no" ? "no" : "yes",
     }))
   }
-  if (!withMode.error.message.toLowerCase().includes("mode")) throw new Error(withMode.error.message)
-  const plain = await supabase.from("organisation_bucket_features").select("bucket_id, feature_id")
-  if (plain.error) throw new Error(plain.error.message)
-  return (plain.data ?? []).map((row) => ({
+  if (!withModeResult.error.message.toLowerCase().includes("mode")) throw new Error(withModeResult.error.message)
+  let plain = supabase.from("organisation_bucket_features").select("bucket_id, feature_id")
+  if (bucketIds) plain = plain.in("bucket_id", bucketIds)
+  const plainResult = await plain
+  if (plainResult.error) throw new Error(plainResult.error.message)
+  return (plainResult.data ?? []).map((row) => ({
     bucketId: row.bucket_id as string,
     featureId: row.feature_id as string,
     mode: "yes",

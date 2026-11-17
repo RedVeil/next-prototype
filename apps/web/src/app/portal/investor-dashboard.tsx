@@ -1,17 +1,33 @@
 "use client"
 
-import { useState, type FormEvent, type ReactNode } from "react"
-import { useRouter } from "next/navigation"
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react"
 import { useSigner, useWallet, useWalletModal } from "@xrpl-commons/xrpl-connect-react"
 import { isWalletError, WalletErrorCode } from "xrpl-connect"
 import { isValidClassicAddress } from "xrpl"
 import { RLUSD_CURRENCY, RLUSD_ISSUER } from "@/ledger/rlusd"
 import { withSourceTag } from "@/ledger/source-tag"
 import { BucketForm, Dialog } from "./bucket-form"
-import { deletePortalBucket, prepareFunds, recordDeposit, setPortalBucketStatus, submitWithdrawal } from "./dashboard-actions"
+import {
+  deletePortalBucket,
+  loadInvestorBucketsPanel,
+  loadInvestorHistoryPanel,
+  loadInvestorPositionsPanel,
+  loadInvestorStatsPanel,
+  prepareFunds,
+  setPortalBucketStatus,
+} from "./dashboard-actions"
+import { trackFundsPayment, type SignedFunds } from "./funds-tracker"
+import { subscribeSignWindow } from "./xaman-window"
 import { formatApr, formatJoined, formatSignedAmount, formatWhen } from "./format"
 import { MoneyGroup } from "./money-value"
-import type { DashboardBucket, DashboardHistoryItem, InvestorDashboardData } from "./investor-data"
+import type {
+  DashboardBucket,
+  DashboardHistoryItem,
+  DashboardPosition,
+  DashboardStats,
+  InvestorBuckets,
+  InvestorShell,
+} from "./investor-data"
 import { CHART_RANGES, pointsInRange, rangeChange, type ChartRange, type ChartSeriesKey } from "./chart-model"
 import { PortfolioChart } from "./portfolio-chart"
 
@@ -43,16 +59,24 @@ function statusTone(status: string): "positive" | "warning" | "danger" | "neutra
   return "neutral"
 }
 
-export function InvestorDashboard({
-  data,
-  walletAddress,
-  tab,
-}: {
-  data: InvestorDashboardData
-  walletAddress: string
-  tab: TabId
-}) {
-  const router = useRouter()
+type HistoryCache = { key: string; items: DashboardHistoryItem[] }
+
+type LoadedPanels = {
+  buckets?: InvestorBuckets
+  positions?: DashboardPosition[]
+  history?: HistoryCache
+  stats?: DashboardStats
+}
+
+function panelReady(stored: LoadedPanels, next: TabId, fundsKey: string) {
+  if (next === "history") return stored.history?.key === fundsKey
+  return stored[next] !== undefined
+}
+
+export function InvestorDashboard({ data, walletAddress }: { data: InvestorShell; walletAddress: string }) {
+  const [tab, setTab] = useState<TabId>("buckets")
+  const [panels, setPanels] = useState<LoadedPanels>({})
+  const [panelErrors, setPanelErrors] = useState<Partial<Record<TabId, string>>>({})
   const [movement, setMovement] = useState<"deposit" | "withdrawal" | null>(null)
   const [range, setRange] = useState<ChartRange>("ALL")
   const [visible, setVisible] = useState<Record<ChartSeriesKey, boolean>>({
@@ -63,24 +87,133 @@ export function InvestorDashboard({
   const [editor, setEditor] = useState<DashboardBucket | "create" | null>(null)
   const [deleteId, setDeleteId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const panelsRef = useRef<LoadedPanels>({})
+  const inflight = useRef<Partial<Record<TabId, boolean>>>({})
+  const requestId = useRef<Record<TabId, number>>({ buckets: 0, positions: 0, history: 0, stats: 0 })
+  const fundsKey = `${data.available}:${data.reserved}`
+  const fundsKeyRef = useRef(fundsKey)
+  const fundsSeen = useRef(fundsKey)
+  const historyItems = panels.history?.key === fundsKey ? panels.history.items : undefined
 
   const ranged = pointsInRange(data.series, range)
   const change = rangeChange(ranged)
   const rangeCaption = CHART_RANGES.find((item) => item.id === range)?.caption ?? "All time"
 
-  function selectTab(next: TabId) {
+  const storePanel = useCallback((patch: Partial<LoadedPanels>) => {
+    panelsRef.current = { ...panelsRef.current, ...patch }
+    setPanels((current) => ({ ...current, ...patch }))
+  }, [])
+
+  const fetchPanel = useCallback(async (next: TabId, force = false) => {
+    const key = fundsKeyRef.current
+    if (!force && panelReady(panelsRef.current, next, key)) return
+    if (!force && inflight.current[next]) return
+    const id = ++requestId.current[next]
+    inflight.current[next] = true
+    setPanelErrors((current) => {
+      if (!current[next]) return current
+      const copy = { ...current }
+      delete copy[next]
+      return copy
+    })
+    try {
+      if (next === "buckets") {
+        const result = await loadInvestorBucketsPanel()
+        if (requestId.current.buckets !== id) return
+        if ("error" in result) {
+          setPanelErrors((current) => ({ ...current, buckets: result.error }))
+          return
+        }
+        storePanel({ buckets: result })
+        return
+      }
+      if (next === "positions") {
+        const result = await loadInvestorPositionsPanel()
+        if (requestId.current.positions !== id) return
+        if ("error" in result) {
+          setPanelErrors((current) => ({ ...current, positions: result.error }))
+          return
+        }
+        storePanel({ positions: result })
+        return
+      }
+      if (next === "history") {
+        const result = await loadInvestorHistoryPanel()
+        if (requestId.current.history !== id) return
+        if ("error" in result) {
+          setPanelErrors((current) => ({ ...current, history: result.error }))
+          return
+        }
+        storePanel({ history: { key, items: result } })
+        return
+      }
+      const result = await loadInvestorStatsPanel()
+      if (requestId.current.stats !== id) return
+      if ("error" in result) {
+        setPanelErrors((current) => ({ ...current, stats: result.error }))
+        return
+      }
+      storePanel({ stats: result })
+    } catch (caught) {
+      if (requestId.current[next] !== id) return
+      const message = caught instanceof Error ? caught.message : "The database did not respond."
+      setPanelErrors((current) => ({ ...current, [next]: message }))
+    } finally {
+      if (requestId.current[next] === id) inflight.current[next] = false
+    }
+  }, [storePanel])
+
+  useEffect(() => {
     const params = new URLSearchParams(window.location.search)
-    if (next === "buckets") params.delete("tab")
-    else params.set("tab", next)
-    const query = params.toString()
-    router.replace(query ? `/investor?${query}` : "/investor", { scroll: false })
+    if (params.has("tab")) {
+      params.delete("tab")
+      const query = params.toString()
+      const next = `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`
+      window.history.replaceState(window.history.state, "", next)
+    }
+    const timer = window.setTimeout(() => {
+      void fetchPanel("buckets")
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [fetchPanel])
+
+  useEffect(() => {
+    fundsKeyRef.current = fundsKey
+    const previous = fundsSeen.current
+    fundsSeen.current = fundsKey
+    if (previous === fundsKey || tab !== "history") return
+    const timer = window.setTimeout(() => {
+      void fetchPanel("history", true)
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [fetchPanel, fundsKey, tab])
+
+  function selectTab(next: TabId) {
+    setTab(next)
+    void fetchPanel(next)
+  }
+
+  async function reloadBuckets() {
+    const result = await loadInvestorBucketsPanel()
+    if ("error" in result) {
+      setError(result.error)
+      return
+    }
+    setError(null)
+    setPanelErrors((current) => {
+      if (!current.buckets) return current
+      const copy = { ...current }
+      delete copy.buckets
+      return copy
+    })
+    storePanel({ buckets: result })
   }
 
   function saved() {
     setEditor(null)
     setMovement(null)
     setDeleteId(null)
-    router.refresh()
+    void reloadBuckets()
   }
 
   return (
@@ -186,24 +319,46 @@ export function InvestorDashboard({
 
       <div className="mt-6" role="tabpanel">
         {tab === "buckets" ? (
-          <Buckets
-            buckets={data.buckets}
-            onCreate={() => setEditor("create")}
-            onEdit={setEditor}
-            onDelete={setDeleteId}
-            onStatus={async (id, status) => {
-              const result = await setPortalBucketStatus(id, status)
-              if (result?.error) setError(result.error)
-              else {
-                setError(null)
-                router.refresh()
-              }
-            }}
-          />
+          panels.buckets ? (
+            <Buckets
+              buckets={panels.buckets.buckets}
+              onCreate={() => setEditor("create")}
+              onEdit={setEditor}
+              onDelete={setDeleteId}
+              onStatus={async (id, status) => {
+                const result = await setPortalBucketStatus(id, status)
+                if (result?.error) setError(result.error)
+                else {
+                  setError(null)
+                  await reloadBuckets()
+                }
+              }}
+            />
+          ) : (
+            <PanelStatus error={panelErrors.buckets} />
+          )
         ) : null}
-        {tab === "positions" ? <Positions positions={data.positions} rate={data.usdRate} /> : null}
-        {tab === "history" ? <History items={data.history} rate={data.usdRate} /> : null}
-        {tab === "stats" ? <Stats stats={data.stats} rate={data.usdRate} /> : null}
+        {tab === "positions" ? (
+          panels.positions ? (
+            <Positions positions={panels.positions} rate={data.usdRate} />
+          ) : (
+            <PanelStatus error={panelErrors.positions} />
+          )
+        ) : null}
+        {tab === "history" ? (
+          historyItems ? (
+            <History items={historyItems} rate={data.usdRate} />
+          ) : (
+            <PanelStatus error={panelErrors.history} />
+          )
+        ) : null}
+        {tab === "stats" ? (
+          panels.stats ? (
+            <Stats stats={panels.stats} rate={data.usdRate} />
+          ) : (
+            <PanelStatus error={panelErrors.stats} />
+          )
+        ) : null}
       </div>
 
       {movement ? (
@@ -216,7 +371,7 @@ export function InvestorDashboard({
           }
           onClose={() => setMovement(null)}
         >
-          <FundsForm kind={movement} walletAddress={walletAddress} onSaved={saved} />
+          <FundsForm kind={movement} walletAddress={walletAddress} onSigningStarted={() => setMovement(null)} />
         </Dialog>
       ) : null}
       {deleteId ? (
@@ -229,7 +384,7 @@ export function InvestorDashboard({
             if (result?.error) setError(result.error)
             else {
               setError(null)
-              router.refresh()
+              await reloadBuckets()
             }
           }}
         />
@@ -241,7 +396,7 @@ export function InvestorDashboard({
           description="A bucket is a standing mandate. It draws from the same available RLUSD. Country and currency lists can be left blank to match any."
           onClose={() => setEditor(null)}
         >
-          <BucketForm bucket={editor === "create" ? null : editor} features={data.features} onSaved={saved} />
+          <BucketForm bucket={editor === "create" ? null : editor} features={panels.buckets?.features ?? []} onSaved={saved} />
         </Dialog>
       ) : null}
     </main>
@@ -308,7 +463,11 @@ function Buckets({
   )
 }
 
-function Positions({ positions, rate }: { positions: InvestorDashboardData["positions"]; rate: number | null }) {
+function PanelStatus({ error }: { error?: string }) {
+  return <p className={`text-sm ${error ? "text-red-700" : "text-neutral-500"}`}>{error ?? "Loading…"}</p>
+}
+
+function Positions({ positions, rate }: { positions: DashboardPosition[]; rate: number | null }) {
   if (positions.length === 0) return <p className="text-sm text-neutral-500">No owned invoices.</p>
   return (
     <div className="overflow-x-auto rounded-lg border border-border bg-white">
@@ -375,7 +534,7 @@ function History({ items, rate }: { items: DashboardHistoryItem[]; rate: number 
   )
 }
 
-function Stats({ stats, rate }: { stats: InvestorDashboardData["stats"]; rate: number | null }) {
+function Stats({ stats, rate }: { stats: DashboardStats; rate: number | null }) {
   const profit = stats.profitLoss
   return (
     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -477,11 +636,11 @@ function walletMessage(error: unknown) {
 function FundsForm({
   kind,
   walletAddress,
-  onSaved,
+  onSigningStarted,
 }: {
   kind: "deposit" | "withdrawal"
   walletAddress: string
-  onSaved: () => void
+  onSigningStarted: () => void
 }) {
   const { account, disconnect } = useWallet()
   const { open, ready } = useWalletModal()
@@ -489,18 +648,16 @@ function FundsForm({
   const [amount, setAmount] = useState("")
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [retry, setRetry] = useState<{ hash: string } | { blob: string } | null>(null)
+  const mounted = useRef(true)
   const stored = isValidClassicAddress(walletAddress)
   const connected = account?.address === walletAddress
 
-  async function finishRecord(result: { error?: string; message?: string; recorded?: boolean } | null, next: { hash: string } | { blob: string }) {
-    if (result?.error) {
-      setRetry(next)
-      setError(result.error)
-      return
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
     }
-    onSaved()
-  }
+  }, [])
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -508,54 +665,79 @@ function FundsForm({
       setError("Set an XRPL address on this user before sending RLUSD.")
       return
     }
-    setPending(true)
     setError(null)
+    if (!connected) {
+      await open()
+      return
+    }
+    const value = Number(amount)
+    if (!Number.isFinite(value) || value <= 0) {
+      setError("Amount must be greater than zero.")
+      return
+    }
+    setPending(true)
+    let handedOff = false
     try {
-      if (retry && "hash" in retry) {
-        await finishRecord(await recordDeposit(retry.hash), retry)
-        return
-      }
-      if (retry && "blob" in retry) {
-        await finishRecord(await submitWithdrawal(retry.blob), retry)
-        return
-      }
-      if (!connected) {
-        await open()
-        return
-      }
-      const value = Number(amount)
-      if (!Number.isFinite(value) || value <= 0) {
-        setError("Amount must be greater than zero.")
-        return
-      }
       const prepared = await prepareFunds(kind, value)
+      if (!mounted.current) return
       if ("error" in prepared) {
         setError(prepared.error)
         return
       }
-      if (prepared.kind === "deposit") {
-        if (account?.address !== prepared.account) {
-          setError("Connect the wallet saved on this user.")
-          return
-        }
-        const signed = await signAndSubmit(
-          withSourceTag({
-            TransactionType: "Payment",
-            Account: prepared.account,
-            Destination: prepared.destination,
-            Amount: { currency: RLUSD_CURRENCY, issuer: RLUSD_ISSUER, value: prepared.value },
-          }),
-        )
-        await finishRecord(await recordDeposit(signed.hash), { hash: signed.hash })
+      if (prepared.kind === "deposit" && account?.address !== prepared.account) {
+        setError("Connect the wallet saved on this user.")
         return
       }
-      const signed = await sign(prepared.transaction)
-      if (!signed.tx_blob) throw new Error("The wallet did not return a signed transaction.")
-      await finishRecord(await submitWithdrawal(signed.tx_blob), { blob: signed.tx_blob })
+
+      let signPromise!: Promise<SignedFunds>
+      const windowPromise = new Promise<"opened" | "blocked" | "settled">((resolve) => {
+        let settled = false
+        const finish = (result: "opened" | "blocked" | "settled") => {
+          if (settled) return
+          settled = true
+          stop()
+          resolve(result)
+        }
+        const stop = subscribeSignWindow((result) => finish(result.opened ? "opened" : "blocked"))
+        signPromise =
+          prepared.kind === "deposit"
+            ? signAndSubmit(
+                withSourceTag({
+                  TransactionType: "Payment",
+                  Account: prepared.account,
+                  Destination: prepared.destination,
+                  Amount: { currency: RLUSD_CURRENCY, issuer: RLUSD_ISSUER, value: prepared.value },
+                }),
+              )
+            : sign(prepared.transaction)
+        void signPromise.then(
+          () => finish("settled"),
+          () => finish("settled"),
+        )
+      })
+      const windowResult = await windowPromise
+
+      if (windowResult === "blocked") {
+        if (mounted.current) setError("The browser blocked the Xaman window.")
+        void signPromise.catch(() => {})
+        return
+      }
+      if (windowResult === "settled") {
+        try {
+          await signPromise
+        } catch (caught) {
+          if (mounted.current) setError(walletMessage(caught))
+          return
+        }
+      }
+
+      handedOff = true
+      trackFundsPayment({ kind: prepared.kind, amount, sign: signPromise })
+      onSigningStarted()
     } catch (caught) {
-      setError(walletMessage(caught))
+      if (mounted.current) setError(walletMessage(caught))
     } finally {
-      setPending(false)
+      if (mounted.current && !handedOff) setPending(false)
     }
   }
 
@@ -585,7 +767,7 @@ function FundsForm({
           step="0.01"
           required
           value={amount}
-          disabled={retry !== null}
+          disabled={pending}
           onChange={(event) => setAmount(event.target.value)}
           className={inputClass}
         />
@@ -596,15 +778,7 @@ function FundsForm({
         disabled={pending || !ready || !stored}
         className="h-10 rounded-md bg-neutral-900 text-sm font-medium text-white disabled:opacity-60"
       >
-        {pending
-          ? "Sending"
-          : retry
-            ? "Update portfolio"
-            : !connected
-              ? "Connect wallet"
-              : kind === "deposit"
-                ? "Deposit"
-                : "Withdraw"}
+        {pending ? "Preparing" : !connected ? "Connect wallet" : kind === "deposit" ? "Deposit" : "Withdraw"}
       </button>
     </form>
   )

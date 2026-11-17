@@ -13,7 +13,14 @@ const PARTIAL_PAYMENT = 0x00020000
 
 type ServiceClient = ReturnType<typeof createServiceClient>
 
-export type FundsResult = { error?: string; message?: string; recorded?: boolean }
+export type FundsResult = {
+  error?: string
+  message?: string
+  recorded?: boolean
+  pending?: boolean
+  hash?: string
+  engineResult?: string
+}
 
 export type FundsPreparation =
   | { error: string }
@@ -83,7 +90,8 @@ function paymentShape(tx: unknown): PaymentShape | null {
   const row = tx as Record<string, unknown>
   if (row.TransactionType !== "Payment") return null
   if (typeof row.Account !== "string" || typeof row.Destination !== "string") return null
-  const amount = issuedAmount(row.Amount)
+  // A signed blob uses Amount. Rippled API v2 returns that field as DeliverMax.
+  const amount = issuedAmount("Amount" in row ? row.Amount : row.DeliverMax)
   if (!amount) return null
   const flags = Number(row.Flags ?? 0)
   return {
@@ -125,12 +133,6 @@ function txnNotFound(error: unknown) {
   if (!error || typeof error !== "object" || !("data" in error)) return false
   const data = error.data
   return Boolean(data && typeof data === "object" && "error" in data && data.error === "txnNotFound")
-}
-
-function delay(ms: number) {
-  return new Promise<void>((resolve) => {
-    setTimeout(resolve, ms)
-  })
 }
 
 async function investorContext(): Promise<{ error: string } | FundsContext> {
@@ -263,20 +265,6 @@ async function readTx(client: Client, hash: string) {
   }
 }
 
-async function waitForSuccess(client: Client, hash: string) {
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    const found = await readTx(client, hash)
-    if (found?.validated) {
-      if (resultCode(found.meta) !== "tesSUCCESS") {
-        throw new Error(resultCode(found.meta) || "The ledger rejected the transaction.")
-      }
-      return found
-    }
-    if (attempt < 7) await delay(1000)
-  }
-  throw new Error("The payment is not in a validated ledger yet.")
-}
-
 function plainTransaction(transaction: SubmittableTransaction) {
   return JSON.parse(JSON.stringify(transaction)) as SubmittableTransaction
 }
@@ -378,6 +366,7 @@ export async function prepareInvestorTransfer(kind: string, amountInput: number)
         account: context.multisig,
         ledger_index: "validated",
       })
+      // Leave Signers unset. Xaman adds the signer; a blank stub comes back unsigned and xrpl-connect rejects it.
       return client.autofill(
         withSourceTag({
           TransactionType: "Payment",
@@ -386,7 +375,6 @@ export async function prepareInvestorTransfer(kind: string, amountInput: number)
           Amount: { currency: RLUSD_CURRENCY, issuer: RLUSD_ISSUER, value },
           Sequence: info.result.account_data.Sequence,
           SigningPubKey: "",
-          Signers: [{ Signer: { Account: context.wallet, SigningPubKey: "", TxnSignature: "" } }],
         }),
         1,
       )
@@ -398,22 +386,34 @@ export async function prepareInvestorTransfer(kind: string, amountInput: number)
   }
 }
 
-export async function recordInvestorDeposit(hashInput: string): Promise<FundsResult> {
+export async function recordInvestorFunds(kind: "deposit" | "withdrawal", hashInput: string): Promise<FundsResult> {
+  if (kind !== "deposit" && kind !== "withdrawal") return { error: "Choose deposit or withdraw." }
   const hash = canonicalHash(hashInput)
   if (!hash) return { error: "The payment hash is missing." }
   const context = await investorContext()
   if ("error" in context) return context
   try {
-    const tx = await withClient((client) => waitForSuccess(client, hash))
+    const tx = await withClient((client) => readTx(client, hash))
+    if (!tx?.validated) return { pending: true }
     const shape = paymentShape(tx.tx_json)
-    if (!shape || shape.account !== context.wallet || shape.destination !== context.multisig) {
-      return { error: "That payment is not a deposit from your wallet to the multisig." }
+    if (kind === "deposit") {
+      if (!shape || shape.account !== context.wallet || shape.destination !== context.multisig) {
+        return { error: "That payment is not a deposit from your wallet to the multisig." }
+      }
+    } else if (
+      !shape ||
+      shape.partial ||
+      shape.account !== context.multisig ||
+      shape.destination !== context.wallet ||
+      shape.signer !== context.wallet
+    ) {
+      return { error: "The signed transaction does not match this withdrawal." }
     }
     const rejected = acceptedPayment(tx, hash, shape)
     if (rejected) return { error: rejected }
     const moved = movedCents(tx.meta, shape.value)
     if (moved === null) return { error: "The payment amount is not RLUSD." }
-    return remember(context, "deposit", roundMoney(moved / 100), hash)
+    return remember(context, kind, roundMoney(moved / 100), hash)
   } catch (error) {
     return { error: error instanceof Error ? error.message : "The payment could not be recorded." }
   }
@@ -453,35 +453,32 @@ export async function submitInvestorWithdrawal(blob: string): Promise<FundsResul
     if (!canSign) return { error: "The connected wallet cannot meet the quorum." }
     if (!canReceive) return { error: "This wallet is not an allowed destination." }
 
-    const tx = await withClient(async (client) => {
+    // Record the portfolio only after a validated ledger. tesSUCCESS here is the node's provisional result.
+    const engineResult = await withClient(async (client) => {
       const existing = await readTx(client, hash)
-      if (existing?.validated) return existing
+      if (existing?.validated) {
+        const code = resultCode(existing.meta)
+        if (code !== "tesSUCCESS") throw new Error(code || "The ledger rejected the transaction.")
+        return "tesSUCCESS"
+      }
       const available = await rlusdHolding(client, context.multisig)
       if (!available || roundMoney(available.balance - committed - amount) < 0) {
         throw new Error("Withdrawal cannot exceed the RLUSD on the multisig.")
       }
       try {
-        const response = await client.submitAndWait(blob)
-        return response.result as LedgerTx
+        const response = await client.submit(blob)
+        const code = response.result.engine_result
+        if (code !== "tesSUCCESS" && code !== "terQUEUED") {
+          throw new Error(code || "The ledger rejected the transaction.")
+        }
+        return code
       } catch (error) {
         const found = await readTx(client, hash)
-        if (found?.validated) return found
+        if (found?.validated && resultCode(found.meta) === "tesSUCCESS") return "tesSUCCESS"
         throw error
       }
     })
-    const confirmed = paymentShape(tx.tx_json)
-    if (
-      !confirmed ||
-      confirmed.account !== shape.account ||
-      confirmed.destination !== shape.destination ||
-      cents(confirmed.value) !== moved ||
-      confirmed.signer !== context.wallet
-    ) {
-      return { error: "The signed transaction does not match this withdrawal." }
-    }
-    const rejected = acceptedPayment(tx, hash, confirmed)
-    if (rejected) return { error: rejected }
-    return remember(context, "withdrawal", amount, hash)
+    return { hash, engineResult }
   } catch (error) {
     return { error: error instanceof Error ? error.message : "The ledger rejected the transaction." }
   }

@@ -4,12 +4,18 @@ import { revalidatePath } from "next/cache"
 import { createBucket, createInvoice, updateBucket, acceptInvoice, type ActionState } from "@/app/sandbox/actions"
 import {
   prepareInvestorTransfer,
-  recordInvestorDeposit,
+  recordInvestorFunds,
   submitInvestorWithdrawal,
   type FundsPreparation,
   type FundsResult,
 } from "@/portfolio/funds"
 import { createServiceClient } from "@/lib/supabase/service"
+import {
+  loadInvestorBuckets,
+  loadInvestorHistory,
+  loadInvestorPositions,
+  loadInvestorStats,
+} from "./investor-data"
 import { portalSession } from "./session"
 
 function text(formData: FormData, name: string) {
@@ -46,12 +52,12 @@ export async function prepareFunds(kind: string, amount: number): Promise<FundsP
   return prepareInvestorTransfer(kind, amount)
 }
 
-export async function recordDeposit(hash: string): Promise<FundsResult> {
-  return refreshFunds(await recordInvestorDeposit(hash))
+export async function recordFunds(kind: "deposit" | "withdrawal", hash: string): Promise<FundsResult> {
+  return refreshFunds(await recordInvestorFunds(kind, hash))
 }
 
 export async function submitWithdrawal(blob: string): Promise<FundsResult> {
-  return refreshFunds(await submitInvestorWithdrawal(blob))
+  return submitInvestorWithdrawal(blob)
 }
 
 async function ownBucket(organisationId: string, id: string) {
@@ -71,9 +77,7 @@ export async function createPortalBucket(_state: ActionState, formData: FormData
   const investor = await investorOrganisation()
   if ("error" in investor) return investor
   formData.set("organisation_id", investor.organisationId)
-  const result = await createBucket(null, formData)
-  if (!result?.error) refreshPortals()
-  return result
+  return createBucket(null, formData)
 }
 
 export async function updatePortalBucket(_state: ActionState, formData: FormData): Promise<ActionState> {
@@ -84,9 +88,7 @@ export async function updatePortalBucket(_state: ActionState, formData: FormData
   const owned = await ownBucket(investor.organisationId, id)
   if ("error" in owned) return owned
   formData.set("organisation_id", investor.organisationId)
-  const result = await updateBucket(null, formData)
-  if (!result?.error) refreshPortals()
-  return result
+  return updateBucket(null, formData)
 }
 
 export async function setPortalBucketStatus(id: string, status: "active" | "paused"): Promise<ActionState> {
@@ -97,8 +99,33 @@ export async function setPortalBucketStatus(id: string, status: "active" | "paus
   const supabase = createServiceClient()
   const { error } = await supabase.from("organisation_buckets").update({ status }).eq("id", id)
   if (error) return { error: error.message }
-  refreshPortals()
   return { message: status === "paused" ? "Bucket paused." : "Bucket active." }
+}
+
+async function investorPanel<T>(load: (organisationId: string) => Promise<T>): Promise<T | { error: string }> {
+  const investor = await investorOrganisation()
+  if (!investor.organisationId) return { error: investor.error ?? "Sign in as an investor." }
+  try {
+    return await load(investor.organisationId)
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : "The database did not respond." }
+  }
+}
+
+export async function loadInvestorBucketsPanel() {
+  return investorPanel(loadInvestorBuckets)
+}
+
+export async function loadInvestorPositionsPanel() {
+  return investorPanel(loadInvestorPositions)
+}
+
+export async function loadInvestorHistoryPanel() {
+  return investorPanel(loadInvestorHistory)
+}
+
+export async function loadInvestorStatsPanel() {
+  return investorPanel(loadInvestorStats)
 }
 
 export async function deletePortalBucket(id: string): Promise<ActionState> {
@@ -117,7 +144,6 @@ export async function deletePortalBucket(id: string): Promise<ActionState> {
 
   const { error } = await supabase.from("organisation_buckets").delete().eq("id", id)
   if (error) return { error: error.message }
-  refreshPortals()
   return { message: "Bucket deleted." }
 }
 

@@ -39,8 +39,3 @@ export function rangeChange(points: PortfolioPoint[]) {
     percent: first === 0 ? null : ((last - first) / first) * 100,
   }
 }
-
-export function parseInvestorTab(value: string | undefined) {
-  if (value === "positions" || value === "history" || value === "stats" || value === "buckets") return value
-  return "buckets"
-}

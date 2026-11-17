@@ -38,11 +38,9 @@ export async function PortalHome({
 
   try {
     if (role === "investor") {
-      const tab = query.tab
       return await InvestorOverview({
         organisationId: session.organisationId,
         identityId: session.id,
-        tab: Array.isArray(tab) ? tab[0] : tab,
       })
     }
     return await SellerOverview({

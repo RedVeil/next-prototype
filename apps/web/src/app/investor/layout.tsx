@@ -1,3 +1,5 @@
+import { FundsTracker } from "../portal/funds-tracker"
+import { ledgerSocketUrl } from "@/ledger/socket"
 import { WalletProviders } from "../sandbox/wallet-provider"
 import { RoleSidebar } from "../portal/role-sidebar"
 import { portalSession } from "../portal/session"
@@ -19,7 +21,7 @@ export default async function InvestorLayout({ children }: LayoutProps<"/investo
   if (!session) return page
   return (
     <WalletProviders network={walletNetwork()} xamanApiKey={process.env.XUMM_API_KEY ?? ""}>
-      {page}
+      <FundsTracker socketUrl={ledgerSocketUrl()}>{page}</FundsTracker>
     </WalletProviders>
   )
 }

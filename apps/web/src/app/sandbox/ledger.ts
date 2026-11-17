@@ -13,6 +13,7 @@ import {
 import { RLUSD_CURRENCY, RLUSD_ISSUER, isRlusdCurrency } from "@/ledger/rlusd"
 import { withSourceTag } from "@/ledger/source-tag"
 import type { createServiceClient } from "@/lib/supabase/service"
+import { ledgerSocketUrl } from "@/ledger/socket"
 import { anyoneCanSend } from "./types"
 
 type ServiceClient = ReturnType<typeof createServiceClient>
@@ -30,12 +31,7 @@ class NeedsFunding extends Error {
   }
 }
 
-export function ledgerSocketUrl() {
-  if (process.env.XRPL_WS_URL) return process.env.XRPL_WS_URL
-  if (process.env.XRPL_NETWORK === "testnet") return "wss://s.altnet.rippletest.net:51233"
-  if (process.env.XRPL_NETWORK === "devnet") return "wss://s.devnet.rippletest.net:51233"
-  return "wss://xrplcluster.com"
-}
+export { ledgerSocketUrl }
 
 function masterKey() {
   const key = process.env.BOT_WALLET_MASTER_KEY
